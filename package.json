@@ -1,0 +1,42 @@
+{
+  "name": "@furlpay/cli",
+  "version": "0.1.0",
+  "description": "Furlpay command-line interface — like stripe-cli, for stablecoins",
+  "license": "MIT",
+  "bin": {
+    "furlpay": "./bin/furlpay.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "commonjs",
+  "homepage": "https://github.com/FurlPay/furlpay-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FurlPay/furlpay-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FurlPay/furlpay-cli/issues"
+  },
+  "author": "Furlpay <hello@furlpay.com>",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "furlpay",
+    "cli",
+    "webhooks",
+    "stripe-cli",
+    "payments",
+    "developer-tools"
+  ],
+  "scripts": {
+    "test": "node --check bin/furlpay.js && node --check lib/util.js && node --check lib/events.js"
+  }
+}
