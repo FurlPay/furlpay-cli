@@ -12,6 +12,9 @@
     "lib"
   ],
   "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  },
   "keywords": [
     "furlpay",
     "stablecoin",
