@@ -1,28 +1,28 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.furlpay/furlpay-cli",
-  "description": "18 financial tools for AI agents: stablecoin balances and transfers, token swaps, fractional stock orders, live market data, hotel and flight search/booking, USDC yield vaults, and Visa card controls.",
-  "repository": {
-    "url": "https://github.com/FurlPay/furlpay-cli",
-    "source": "github"
-  },
-  "version": "0.2.1",
-  "packages": [
-    {
-      "registryType": "npm",
-      "identifier": "@furlpay/cli",
-      "version": "0.2.1",
-      "runtimeHint": "npx",
-      "transport": {
-        "type": "stdio"
-      },
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "mcp",
-          "description": "Start the CLI in MCP server mode"
-        }
-      ]
-    }
-  ]
+    "$schema":  "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name":  "io.github.furlpay/furlpay-cli",
+    "description":  "Stablecoin payments, swaps, stock orders, market data, travel booking, yield and card controls.",
+    "repository":  {
+                       "url":  "https://github.com/FurlPay/furlpay-cli",
+                       "source":  "github"
+                   },
+    "version":  "0.2.1",
+    "packages":  [
+                     {
+                         "registryType":  "npm",
+                         "identifier":  "@furlpay/cli",
+                         "version":  "0.2.1",
+                         "runtimeHint":  "npx",
+                         "transport":  {
+                                           "type":  "stdio"
+                                       },
+                         "packageArguments":  [
+                                                  {
+                                                      "type":  "positional",
+                                                      "value":  "mcp",
+                                                      "description":  "Start the CLI in MCP server mode"
+                                                  }
+                                              ]
+                     }
+                 ]
 }
