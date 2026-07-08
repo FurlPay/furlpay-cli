@@ -4,11 +4,14 @@
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
-const { c, loadConfig, saveConfig, sign, parseFlags } = require("../lib/util");
+const { c, loadConfig, saveConfig, sign, parseFlags, positionals } = require("../lib/util");
 const { SAMPLES, buildEvent } = require("../lib/events");
+const commands = require("../lib/commands");
+const VERSION = require("../package.json").version;
 
 const [, , command, ...rest] = process.argv;
 const flags = parseFlags(rest);
+const args = positionals(rest);
 
 function post(targetUrl, body, headers) {
   return new Promise((resolve, reject) => {
@@ -35,23 +38,63 @@ function post(targetUrl, body, headers) {
 }
 
 function help() {
-  console.log(`
-${c.bold("Furlpay CLI")} ${c.dim("v0.1.0")}
+  console.log(require("../lib/banner").banner());
+  console.log(`${c.bold("FurlPay CLI")} ${c.dim("v" + VERSION)} — stablecoin payments, investing, travel & yield from your terminal
 
 ${c.bold("Usage")}
-  furlpay <command> [options]
+  furlpay <command> [subcommand] [options]
 
-${c.bold("Commands")}
-  login --key <sk_...>              Store your API/webhook secret locally
-  listen --forward-to <url>         Stream sandbox webhooks to your local server
-  trigger <event> [--forward-to u]  Emit a signed test event
-  logs --tail                       Stream live API request/response cycles
-  events                            List triggerable event types
+${c.bold("Auth & config")}
+  login [--key sk_…] [--email a@b.c]   Log in (email OTP) or store an API key
+  logout · whoami                      Session management
+  config <get|set> [key] [value]       CLI configuration
+  env [sandbox|live]                   Show or switch environment
+  status                               API + chain health
+
+${c.bold("Wallet & payments")}
+  balance [--chain arbitrum]           All token balances + total
+  wallet <address|fund|export>         Safe smart-account details
+  send <amount> <to> [--token USDC]    Gas-sponsored transfer (--mfa for ≥$5k)
+  swap <from> <to> <amount>            Token swap via Li.Fi (--quote-only)
+  bridge <amount> --from eth --to arb  Cross-chain bridge (CCTP route)
+  pay <order-id>                       Pay an order / payment link
+  tx [<hash>|list] [--category swap]   Transaction lookup & history
+
+${c.bold("Investing")}
+  invest buy AAPL 10                   Buy $10 of AAPL (--qty for shares)
+  invest sell NVDA 5 [--type limit --limit-price 120]
+  invest portfolio · quote <SYM> · history
+  invest dca [create <SYM> <usd> --cadence week | cancel <id>]
+  market                               Indices + top movers
+
+${c.bold("Travel · Cards · Earn")}
+  travel search --city Tokyo --checkin 2026-08-01 --checkout 2026-08-05
+  travel flights --from NYC --to TYO · book · bookings · cancel <id>
+  card list · create [--type virtual] · freeze/unfreeze <id> · limits <id> · transactions <id>
+  earn [balance] · deposit <usd> · withdraw <usd> · apy · history
+
+${c.bold("Developer tools")}
+  listen --forward-to <url>            Stream sandbox webhooks to localhost
+  trigger <event> · events             Emit signed test events
+  logs --tail                          Stream API request/response cycles
+  api <METHOD> </path> [--data '{}']   Raw authenticated API call
+  docs [topic]                         Docs map (+ opens browser; --no-open)
+  mcp                                  Run as an MCP server for AI agents
+  completion <bash|zsh|fish|powershell>
+
+${c.bold("Dashboard")}
+  dashboard [--portfolio|--earn]       Interactive terminal dashboard
+
+${c.bold("Global flags")}
+  --output json|csv|table   --quiet   --env sandbox|live   --yes   --api-base <url>
 
 ${c.bold("Examples")}
-  furlpay login --key sk_sandbox_123
-  furlpay listen --forward-to localhost:3000/api/webhooks
-  furlpay trigger card.transaction.authorized
+  furlpay login
+  furlpay balance --output json
+  furlpay send 25 0xAbc… --token USDC
+  furlpay invest buy AAPL 50 -- then: furlpay invest portfolio
+  furlpay travel search --city Tokyo --min-stars 4
+  furlpay dashboard
 `);
 }
 
@@ -60,13 +103,50 @@ async function main() {
   const secret = flags.secret || cfg.secret || cfg.key || "whsec_sandbox_bridge";
 
   switch (command) {
-    case "login": {
-      if (!flags.key) return console.error(c.red("Error: --key is required"));
-      saveConfig({ ...cfg, key: flags.key, secret: flags.secret || flags.key });
-      console.log(c.green("✓ ") + "Credentials saved to ~/.furlpay/config.json");
+    // ---- auth & config ----------------------------------------------------
+    case "login": return commands.login(args, flags);
+    case "logout": return commands.logout(args, flags);
+    case "whoami": return commands.whoami(args, flags);
+    case "config": return commands.config(args, flags);
+    case "env": return commands.env(args, flags);
+    case "status": return commands.status(args, flags);
+
+    // ---- wallet & payments ------------------------------------------------
+    case "balance": return commands.balance(args, flags);
+    case "wallet": return commands.wallet(args, flags);
+    case "send": return commands.send(args, flags);
+    case "swap": return commands.swap(args, flags);
+    case "bridge": return commands.bridge(args, flags);
+    case "pay": return commands.pay(args, flags);
+    case "tx": return commands.tx(args, flags);
+
+    // ---- investing ----------------------------------------------------------
+    case "invest": return commands.invest(args, flags);
+    case "market": return commands.market(args, flags);
+
+    // ---- travel / cards / earn ----------------------------------------------
+    case "travel": return commands.travel(args, flags);
+    case "card": case "cards": return commands.card(args, flags);
+    case "earn": return commands.earn(args, flags);
+
+    // ---- developer tools ----------------------------------------------------
+    case "api": return commands.apiCmd(args, flags);
+    case "docs": return commands.docs(args, flags);
+    case "mcp": return require("../lib/mcp").serve(flags);
+    case "dashboard": return require("../lib/dashboard").run(flags);
+
+    case "completion": {
+      const script = require("../lib/completion").generate(args[0]);
+      if (!script) return console.error(c.red("Usage: furlpay completion <bash|zsh|fish|powershell>"));
+      process.stdout.write(script);
       break;
     }
 
+    case "version": case "--version": case "-v":
+      console.log(VERSION);
+      break;
+
+    // ---- webhook sandbox tooling (original commands, unchanged) ------------
     case "events": {
       console.log(c.bold("Triggerable events:"));
       Object.keys(SAMPLES).forEach((e) => console.log("  " + c.cyan(e)));
@@ -162,4 +242,7 @@ function normalize(url) {
   return /^https?:\/\//.test(url) ? url : "http://" + url;
 }
 
-main();
+main().catch((e) => {
+  console.error(c.red("✗ " + e.message));
+  process.exit(1);
+});
