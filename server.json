@@ -1,17 +1,17 @@
 {
     "$schema":  "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-    "name":  "io.github.furlpay/furlpay-cli",
+    "name":  "io.github.FurlPay/furlpay-cli",
     "description":  "Stablecoin payments, swaps, stock orders, market data, travel booking, yield and card controls.",
     "repository":  {
                        "url":  "https://github.com/FurlPay/furlpay-cli",
                        "source":  "github"
                    },
-    "version":  "0.2.1",
+    "version":  "0.2.2",
     "packages":  [
                      {
                          "registryType":  "npm",
                          "identifier":  "@furlpay/cli",
-                         "version":  "0.2.1",
+                         "version":  "0.2.2",
                          "runtimeHint":  "npx",
                          "transport":  {
                                            "type":  "stdio"
