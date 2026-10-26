@@ -54,6 +54,9 @@ furlpay invest sell NVDA 2 --qty           # 2 shares
 furlpay invest buy TSLA 100 --type limit --limit-price 380
 furlpay invest portfolio                   # holdings + P&L, marked to live quotes
 furlpay invest quote AAPL                  # live quote + AI digest + your position
+furlpay invest watchlist add TSLA           # save a symbol locally
+furlpay invest watchlist                    # list saved symbols with current quotes
+furlpay invest watchlist remove TSLA        # remove a saved symbol
 furlpay invest dca create AAPL 50 --cadence week
 furlpay market                             # indices + top movers
 ```

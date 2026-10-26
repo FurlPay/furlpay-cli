@@ -64,6 +64,7 @@ ${c.bold("Investing")}
   invest buy AAPL 10                   Buy $10 of AAPL (--qty for shares)
   invest sell NVDA 5 [--type limit --limit-price 120]
   invest portfolio · quote <SYM> · history
+  invest watchlist [add <SYM> | remove <SYM>]
   invest dca [create <SYM> <usd> --cadence week | cancel <id>]
   market                               Indices + top movers
 
