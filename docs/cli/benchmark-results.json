@@ -1,0 +1,23 @@
+{
+  "measuredAt": "2026-10-29T12:41:04.682Z",
+  "platform": "win32",
+  "arch": "x64",
+  "node": "v26.7.0",
+  "cpu": "AMD Ryzen 5 4600H with Radeon Graphics         ",
+  "paymentRender": {
+    "samples": 500,
+    "p50Ms": 3.846,
+    "p95Ms": 9.999,
+    "p99Ms": 12.813
+  },
+  "localSseParseReconcileRender": {
+    "samples": 500,
+    "p50Ms": 1.245,
+    "p95Ms": 7.238,
+    "p99Ms": 9.651
+  },
+  "renderBatchDelayMs": 16,
+  "upstreamPropagation": "UNVERIFIED",
+  "publicNetworkLatency": "UNVERIFIED",
+  "scope": "Local synthetic event benchmark, not real financial events or end-to-end production latency."
+}

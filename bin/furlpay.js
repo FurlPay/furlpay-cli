@@ -57,6 +57,8 @@ ${c.bold("Wallet & payments")}
   send <amount> <to> [--token USDC]    Gas-sponsored transfer (--mfa for ≥$5k)
   swap <from> <to> <amount>            Token swap via Li.Fi (--quote-only)
   bridge <amount> --from eth --to arb  Cross-chain bridge (CCTP route)
+  pay <@recipient> <amount> [USD]     Review and confirm an A2A payment
+  pay --demo                          Offline reference UI (no funds move)
   pay <order-id>                       Pay an order / payment link
   tx [<hash>|list] [--category swap]   Transaction lookup & history
 
@@ -76,14 +78,20 @@ ${c.bold("Travel · Cards · Earn")}
 ${c.bold("Developer tools")}
   listen --forward-to <url>            Stream sandbox webhooks to localhost
   trigger <event> · events             Emit signed test events
-  logs --tail                          Stream API request/response cycles
+  logs --tail                          Watch real ops security events (admin)
   api <METHOD> </path> [--data '{}']   Raw authenticated API call
   docs [topic]                         Docs map (+ opens browser; --no-open)
   mcp                                  Run as an MCP server for AI agents
   completion <bash|zsh|fish|powershell>
 
 ${c.bold("Dashboard")}
-  dashboard [--portfolio|--earn]       Interactive terminal dashboard
+  dashboard [--live] [--json]         Automatically refreshed account data
+  wallet balance --watch              Watch account balances
+  chains status --watch                Watch verified RPC health
+  transactions --live                  Watch server-reported payment status
+  security monitor                     Watch ops security events (admin)
+  ledger --watch                       Watch ledger snapshot (admin)
+  directory @handle --watch            Watch business directory decisions
 
 ${c.bold("Global flags")}
   --output json|csv|table   --quiet   --env sandbox|live   --yes   --api-base <url>
@@ -109,16 +117,23 @@ async function main() {
     case "whoami": return commands.whoami(args, flags);
     case "config": return commands.config(args, flags);
     case "env": return commands.env(args, flags);
-    case "status": return commands.status(args, flags);
+    case "status": return require("../lib/watch").run(["chains"], { ...flags, once: !(flags.watch || flags.live) });
+    case "chains": return require("../lib/watch").run(["chains"], { ...flags, once: !(flags.watch || flags.live) });
+    case "transactions": return require("../lib/watch").run(["transactions"], { ...flags, once: !(flags.watch || flags.live) });
+    case "customers": return require("../lib/watch").run(["customers"], { ...flags, once: !(flags.watch || flags.live) });
+    case "stripe": return require("../lib/watch").run(["stripe"], { ...flags, once: !(flags.watch || flags.live) });
+    case "security": return require("../lib/watch").run(["security"], { ...flags, once: args[0] !== "monitor" && !(flags.watch || flags.live) });
+    case "ledger": return require("../lib/watch").run(["ledger"], { ...flags, once: !(flags.watch || flags.live) });
+    case "directory": return require("../lib/watch").run(["directory"], { ...flags, recipient: args[0], once: !(flags.watch || flags.live) });
 
     // ---- wallet & payments ------------------------------------------------
-    case "balance": return commands.balance(args, flags);
-    case "wallet": return commands.wallet(args, flags);
-    case "send": return commands.send(args, flags);
+    case "balance": return flags.watch || flags.live ? require("../lib/watch").run(["wallet"], flags) : commands.balance(args, flags);
+    case "wallet": return args[0] === "balance" ? require("../lib/watch").run(["wallet"], { ...flags, once: !(flags.watch || flags.live) }) : commands.wallet(args, flags);
+    case "send": throw new Error("Wallet-signed transfer proof is required. Use the FurlPay wallet to sign a transfer, or use furlpay pay for reviewed USD account payments.");
     case "swap": return commands.swap(args, flags);
     case "bridge": return commands.bridge(args, flags);
     case "pay": return commands.pay(args, flags);
-    case "tx": return commands.tx(args, flags);
+    case "tx": return flags.watch || flags.live ? require("../lib/watch").run(["transactions"], flags) : commands.tx(args, flags);
 
     // ---- investing ----------------------------------------------------------
     case "invest": return commands.invest(args, flags);
@@ -133,7 +148,7 @@ async function main() {
     case "api": return commands.apiCmd(args, flags);
     case "docs": return commands.docs(args, flags);
     case "mcp": return require("../lib/mcp").serve(flags);
-    case "dashboard": return require("../lib/dashboard").run(flags);
+    case "dashboard": return require("../lib/watch").run(["wallet", "transactions", "chains"], flags);
 
     case "completion": {
       const script = require("../lib/completion").generate(args[0]);
@@ -174,7 +189,7 @@ async function main() {
         console.log(`${ok ? c.green("✓") : c.red("✗")} ${c.bold(type)} → ${target}  ${c.dim(res.status)}`);
         if (res.body) console.log(c.dim("  " + res.body.slice(0, 200)));
       } catch (e) {
-        console.error(c.red("✗ " + e.message));
+        console.error(c.red("✗ " + require("../lib/terminal").sanitize(e.message)));
       }
       break;
     }
@@ -205,24 +220,7 @@ async function main() {
       break;
     }
 
-    case "logs": {
-      console.log(c.dim("Streaming live logs (Ctrl+C to stop)…\n"));
-      const lines = [
-        "200 POST /api/wallets/transfer  gasSponsored=true",
-        "202 POST /api/webhooks/marqeta  jit_funding.approved=true",
-        "403 POST /api/wallets/transfer  blocked_by_aml",
-        "200 GET  /api/investing/portfolio",
-        "200 POST /api/swaps  route=USDT->USDC base",
-      ];
-      let n = 0;
-      setInterval(() => {
-        const line = lines[n++ % lines.length];
-        const code = line.slice(0, 3);
-        const paint = code.startsWith("2") ? c.green : code.startsWith("4") ? c.yellow : c.red;
-        console.log(`${c.dim(new Date().toLocaleTimeString())}  ${paint(line)}`);
-      }, 1500);
-      break;
-    }
+    case "logs": return require("../lib/watch").run(["security"], { ...flags, once: !flags.tail });
 
     case undefined:
     case "help":

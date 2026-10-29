@@ -1,15 +1,16 @@
 {
   "name": "@furlpay/cli",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "mcpName": "io.github.FurlPay/furlpay-cli",
-  "description": "FurlPay CLI â€” stablecoin payments, investing, travel booking, yield and webhook tooling from your terminal. MCP server included.",
+  "description": "FurlPay CLI: account-to-account payments, responsive terminal UI, developer tools and MCP.",
   "license": "MIT",
   "bin": {
     "furlpay": "bin/furlpay.js"
   },
   "files": [
     "bin",
-    "lib"
+    "lib",
+    "docs"
   ],
   "type": "commonjs",
   "keywords": [
@@ -21,5 +22,23 @@
     "mcp",
     "webhooks",
     "investing"
-  ]
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "node --test",
+    "preview": "node bin/furlpay.js pay --demo",
+    "docs:preview": "node scripts/render-preview.js",
+    "benchmark": "node scripts/benchmark.js",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FurlPay/furlpay-cli.git"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
 }
