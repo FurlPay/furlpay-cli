@@ -32,6 +32,7 @@ async function flow({ flags = {}, q = quote(), response, confirm = async () => t
         return response || { status: 'completed', transferId: 'tr_real', ledgerTxId: 'ledger_real', settledAt: new Date().toISOString(), amount: 10, currency: 'USD' };
       },
       now: () => Date.now() + (advance && tick++ ? 120000 : 0),
+      reservePayment: () => require('node:crypto').randomUUID(),
       write: s => output.push(s), diagnostic: s => diagnostics.push(s), confirm,
     });
     return { result, calls, output: output.join(''), diagnostics, exitCode: process.exitCode };

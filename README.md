@@ -1,5 +1,11 @@
 # @furlpay/cli
 
+Phase 5 hardening adds Windows DPAPI configuration encryption, durable payment
+retry keys and HTTPS-only directory links. See the [implementation status and
+remaining integration requirements](docs/cli/FURLPAY-PHASE5-STATUS.md).
+Matching automatic payment requests reuse their saved key; use an explicit new
+`--idempotency-key` only for a separate payment after reconciling the previous one.
+
 FurlPay's terminal client for reviewed account-to-account payments and freshness-aware financial monitoring.
 
 ![FurlPay payment preview](docs/terminal-preview.svg)
