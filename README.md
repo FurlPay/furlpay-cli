@@ -1,5 +1,11 @@
 # @furlpay/cli
 
+![Node.js](https://img.shields.io/badge/Node.js-22%2B-5FA04E?logo=nodedotjs&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-CommonJS-F7DF1E?logo=javascript&logoColor=black)
+![npm](https://img.shields.io/badge/npm-%40furlpay%2Fcli-CB3837?logo=npm&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI-2088FF?logo=githubactions&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue)
+
 Phase 5 hardening adds Windows DPAPI configuration encryption, durable payment
 retry keys and HTTPS-only directory links. See the [implementation status and
 remaining integration requirements](docs/cli/FURLPAY-PHASE5-STATUS.md).
@@ -11,6 +17,27 @@ FurlPay's terminal client for reviewed account-to-account payments and freshness
 ![FurlPay payment preview](docs/terminal-preview.svg)
 
 The payment review follows the supplied dark fintech reference: mint confirmations, violet panels, rounded terminal geometry, a wide two-column profile and transfer layout, and responsive compact layouts. It adapts to TrueColor, 256-colour, basic ANSI, NO_COLOR, and narrow terminals.
+
+## Tech stack
+
+| Layer | Implementation |
+| --- | --- |
+| Runtime | Node.js 22+, JavaScript with native CommonJS |
+| Terminal UI | ANSI rendering with TrueColor, 256-colour, basic colour and NO_COLOR support |
+| Network | HTTPS REST snapshots, SSE and optional WebSocket transport through `ws` |
+| Credentials | Windows DPAPI CurrentUser encryption; POSIX file permissions |
+| Verification | Node.js built-in test runner and build checks |
+| Automation | GitHub Actions matrix for Node 22/24 on Linux, macOS and Windows |
+
+## Completion status
+
+The terminal UI, monitoring client, Windows credential encryption, durable retry
+keys and HTTPS-only profile links are implemented. Production readiness is still
+incomplete: certificate pinning and request signatures, macOS Keychain/Linux
+Secret Service, backend quote and atomic settlement verification, production
+event feeds, and release signing remain open. See the
+[Phase 5 status report](docs/cli/FURLPAY-PHASE5-STATUS.md) for exact boundaries.
+Pushing this source does not publish an npm package or deploy the backend.
 
 ## Install
 
@@ -50,7 +77,7 @@ furlpay dashboard --live
 furlpay wallet balance --watch
 furlpay chains status --watch
 furlpay transactions --live
-furlpay directory @recipient --watch
+furlpay directory '@recipient' --watch
 furlpay security monitor
 furlpay ledger --watch
 ~~~
@@ -74,7 +101,7 @@ furlpay wallet address
 furlpay swap USDT USDC 100 --quote-only
 furlpay tx list
 furlpay invest portfolio
-furlpay travel search --city Tokyo --checkin 2026-08-01 --checkout 2026-08-05
+furlpay travel search --city Tokyo --checkin 2026-12-01 --checkout 2026-12-05
 furlpay card list
 furlpay earn
 furlpay completion bash|zsh|fish|powershell
@@ -111,6 +138,10 @@ npm run benchmark
 ~~~
 
 The package uses Node.js CommonJS and one audited runtime dependency, ws, for optional authenticated WebSocket subscriptions. CI tests Node 22 and 24 on Ubuntu, macOS, and Windows.
+
+Local verification on 29 October 2026 (Windows, Node.js 26.7.0): build check
+passed; all 75 tests passed. This does not replace the Node 22/24 CI matrix or
+production integration verification.
 
 ## Documentation
 
