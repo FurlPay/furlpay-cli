@@ -1,7 +1,7 @@
 {
   "name": "@furlpay/cli",
-  "version": "0.1.0",
-  "description": "FurlPay CLI — Institutional-grade x402 payment facilitation, mainnet CLOB market data, and autonomous agent settlement infrastructure",
+  "version": "0.4.0",
+  "description": "FurlPay CLI: Institutional x402 v2 payment facilitation, mainnet CLOB market data, and autonomous agent settlement infrastructure",
   "author": "FurlPay <engineering@furlpay.io>",
   "license": "MIT",
   "repository": {
@@ -13,17 +13,18 @@
     "furlpay",
     "x402",
     "stablecoin",
-    "payment",
+    "payments",
     "settlement",
     "CLOB",
     "orderbook",
     "hyperliquid",
-    "USDC",
+    "usdc",
     "agent",
     "micropayment",
     "fintech",
     "DeFi",
-    "tokenization"
+    "tokenization",
+    "mcp"
   ],
   "type": "module",
   "bin": {
@@ -39,40 +40,42 @@
   },
   "files": [
     "dist",
+    "bin",
+    "lib",
+    "docs",
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "eslint src/",
+    "benchmark": "node dist/cli.js benchmark",
     "clean": "rimraf dist",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "chalk": "^5.4.1",
-    "commander": "^13.1.0",
-    "ethers": "^6.13.4",
-    "ora": "^8.1.1",
-    "ws": "^8.18.0",
-    "inquirer": "^12.2.0",
-    "conf": "^13.0.1",
     "cli-table3": "^0.6.5",
-    "dotenv": "^16.4.7"
+    "commander": "^13.1.0",
+    "conf": "^13.0.1",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.4",
+    "inquirer": "^12.2.0",
+    "ora": "^8.1.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/inquirer": "^9.0.7",
     "@types/node": "^22.9.0",
     "@types/ws": "^8.5.13",
-    "@types/inquirer": "^9.0.7",
-    "typescript": "^5.7.2",
+    "rimraf": "^6.0.1",
     "tsx": "^4.19.2",
-    "vitest": "^2.1.5",
-    "rimraf": "^6.0.1"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.5"
   }
 }

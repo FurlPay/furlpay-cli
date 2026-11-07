@@ -3,7 +3,7 @@
 > **Institutional x402 v2 Payment Facilitation, Mainnet CLOB Market Data, and Autonomous AI-Agent Settlement Infrastructure**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-emerald.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-emerald.svg)](package.json)
 [![Standard: x402 v2](https://img.shields.io/badge/standard-x402_v2-purple.svg)](https://www.x402.org)
 [![CAIP-2](https://img.shields.io/badge/spec-CAIP--2-orange.svg)](https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md)
 
@@ -17,7 +17,7 @@
   ║  |_| \_,_|_| |_||_|  \__,_| \_, |            ║
   ║                              |__/             ║
   ║  Institutional x402 Payment Infrastructure    ║
-  ║  v0.1.0                                       ║
+  ║  v0.4.0                                       ║
   ╚═══════════════════════════════════════════════╝
 ```
 
@@ -124,7 +124,8 @@ node dist/cli.js pay verify @challenge.json @authorization.json
 ### 4. Empirical Latency Benchmarks
 Execute the automated quantitative latency benchmark suite directly against the production Layer 1 state machine:
 ```bash
-node dist/cli.js benchmark --coin BTC --iterations 15 --output benchmark_cli_results.json
+npm run benchmark
+# or: node dist/cli.js benchmark --coin BTC --iterations 15
 ```
 
 ```
@@ -185,6 +186,7 @@ console.log(`Authorization valid: ${verification.valid}`);
 
 ## Architecture & Specifications
 
+- **Documentation & Status:** [docs/](docs/)
 - **x402 Protocol Specification:** [x402-specification-v2.md](https://github.com/x402-rs/x402-rs/blob/main/docs/specs/x402-specification-v2.md)
 - **Tokenized Infrastructure Research:** [`GENESIS_2.0_INSTITUTIONAL_RESEARCH_REPORT_2026.md`](file:///c:/Users/ashut/Downloads/trading%20for%20years/GENESIS_2.0_INSTITUTIONAL_RESEARCH_REPORT_2026.md)
 - **Tokenized Commodities & PAXG Benchmark:** [`PAXG_TOKENIZED_RWA_TRADING_RESEARCH_REPORT_2026.md`](file:///c:/Users/ashut/Downloads/trading%20for%20years/PAXG_TOKENIZED_RWA_TRADING_RESEARCH_REPORT_2026.md)
