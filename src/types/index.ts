@@ -155,8 +155,106 @@ export interface SettlementRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// §6  Benchmarking Types
+// §7  Multi-Chain & Tokenized Securities Types (2026 Institutional Architecture)
 // ─────────────────────────────────────────────────────────────────────────────
+
+export type AssetClass = 'equity' | 'fund' | 'commodity' | 'bond' | 'private_credit';
+
+export type LegalRepresentation =
+  | 'issuer_sponsored'       // Direct ownership register (e.g. Dinari dShares, Securitize)
+  | 'custodial_entitlement'  // Custodian backed 1:1 security claim (e.g. Backed Finance, Ondo)
+  | 'synthetic_exposure';    // Price exposure without underlying equity claim (e.g. xStocks, perps)
+
+export type VerificationStatus = 'unverified' | 'pending' | 'verified' | 'suspended';
+
+export interface TokenMetadata {
+  name: string;
+  symbol: string;
+  decimals: number;
+  totalSupply?: string;
+  verifiedOnChain: boolean;
+  bytecodeSize?: number;
+}
+
+export interface ChainTransaction {
+  hash: string;
+  from: string;
+  to: string;
+  value: string;
+  blockNumber: number | bigint;
+  status: 'confirmed' | 'failed' | 'pending';
+  timestampMs?: number;
+}
+
+export interface SimulationResult {
+  success: boolean;
+  gasEstimated?: bigint | string;
+  logs?: string[];
+  revertReason?: string;
+  netCostUsdc?: string;
+  simulatedAt: number;
+}
+
+export interface ChainStatus {
+  chainId: string;
+  name: string;
+  type: 'evm' | 'solana' | 'hyperliquid';
+  rpcUrl: string;
+  blockHeight: number | bigint;
+  latencyMs: number;
+  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE';
+  lastCheckedMs: number;
+}
+
+export interface TokenizedAsset {
+  assetId: string;
+  ticker: string;
+  displayName: string;
+  assetClass: AssetClass;
+  representation: LegalRepresentation;
+  chainId: string;
+  tokenAddress: string;
+  standard: string;
+  issuer: string;
+  custodian?: string;
+  transferAgent?: string;
+  underlyingAsset?: string;
+  ownershipRightsVerified: boolean;
+  redemptionTermsVerified: boolean;
+  jurisdictionRules: string[];
+  investorEligibilityRequired: boolean;
+  tradingEnabled: boolean;
+  settlementEnabled: boolean;
+  verificationStatus: VerificationStatus;
+  referencePriceUsd?: number;
+  tokenPriceUsd?: number;
+  premiumDiscountBps?: number;
+}
+
+export interface CrossVenuePriceComparison {
+  ticker: string;
+  tokenizedPrice: number;
+  underlyingPrice: number;
+  premiumDiscountBps: number;
+  sessionState: 'REGULAR_OPEN' | 'CLOSED' | 'PRE_MARKET' | 'AFTER_HOURS';
+  tokenVenue: string;
+  underlyingVenue: string;
+  liquidityUsd10bps: number;
+  liquidityUsd50bps: number;
+  estimatedImpact10kUsd: number; // in bps
+  updatedAtMs: number;
+}
+
+export interface ChainAdapter {
+  readonly chainId: string;
+  readonly network: string;
+  getBlockHeight(): Promise<number | bigint>;
+  getNativeBalance(address: string): Promise<string>;
+  getTokenBalance(tokenAddress: string, walletAddress: string): Promise<string>;
+  getTokenMetadata(tokenAddress: string): Promise<TokenMetadata>;
+  getTransaction(transactionHash: string): Promise<ChainTransaction | null>;
+  simulateTransaction(tx: Record<string, unknown>): Promise<SimulationResult>;
+}
 
 export interface LatencyStats {
   median: number;

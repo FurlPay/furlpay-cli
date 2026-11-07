@@ -41,6 +41,16 @@ import {
   configSetCommand,
   configResetCommand,
 } from './commands/config.js';
+import {
+  chainsStatusCommand,
+  chainsBalancesCommand,
+} from './commands/chains.js';
+import {
+  securitiesListCommand,
+  securitiesInspectCommand,
+  securitiesCompareCommand,
+  settlementSimulateCommand,
+} from './commands/securities.js';
 import { banner } from './utils/logger.js';
 
 const program = new Command();
@@ -155,6 +165,52 @@ program
   .option('-n, --iterations <n>', 'Number of benchmark iterations', '15')
   .option('-o, --output <path>', 'Save results to JSON file')
   .action(benchmarkCommand);
+
+// ── furlpay chains ──────────────────────────────────────────────────────
+const chains = program
+  .command('chains')
+  .description('Multi-chain network connectivity and balance inspection (Arc, Base, Arbitrum, Solana)');
+
+chains
+  .command('status')
+  .description('Check live RPC connectivity, block heights, and network latency')
+  .action(chainsStatusCommand);
+
+chains
+  .command('balances <address>')
+  .description('Query native and token balances across all configured chains')
+  .action(chainsBalancesCommand);
+
+// ── furlpay securities ──────────────────────────────────────────────────
+const securities = program
+  .command('securities')
+  .description('Tokenized stocks & securities intelligence (Dinari, Backed, Ondo, Securitize)');
+
+securities
+  .command('list')
+  .description('List verified tokenized securities with legal representation classifications')
+  .option('-c, --class <assetClass>', 'Filter by asset class (equity, fund, bond)')
+  .action(securitiesListCommand);
+
+securities
+  .command('inspect <ticker>')
+  .description('Inspect legal ownership structure, custodian, transfer agent, and KYC rules')
+  .action(securitiesInspectCommand);
+
+securities
+  .command('compare <ticker>')
+  .description('Compare tokenized price vs. underlying stock reference price, premium/discount & impact')
+  .action(securitiesCompareCommand);
+
+// ── furlpay settlement ──────────────────────────────────────────────────
+const settlement = program
+  .command('settlement')
+  .description('Atomic DvP settlement verification and simulation');
+
+settlement
+  .command('simulate <ticker> <amount>')
+  .description('Simulate atomic DvP settlement of tokenized securities for USDC')
+  .action(settlementSimulateCommand);
 
 // ── furlpay config ──────────────────────────────────────────────────────
 const config = program
