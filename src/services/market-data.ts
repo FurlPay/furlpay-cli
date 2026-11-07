@@ -117,7 +117,7 @@ export class MarketDataService {
     const imbalanceRatio =
       sumBidVol + sumAskVol === 0
         ? 0
-        : ((sumBidVol - sumAskVol) / (sumBidVol + sumAskVol)) * 100;
+        : (sumBidVol - sumAskVol) / (sumBidVol + sumAskVol);
 
     return {
       midPrice,
