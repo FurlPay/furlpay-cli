@@ -1,141 +1,152 @@
 /**
- * ─────────────────────────────────────────────────────────────
- * FurlPay CLI — Hawkes Point Process Intensity Service (2026)
- * ─────────────────────────────────────────────────────────────
- * Empirical Bivariate Hawkes Process for High-Frequency Trade Flow.
- * Reference: Raffaelli, Cestari, Marazzina & Formentin (2026).
- *
- * Implements:
- *   - Event-time initialization (no local Date.now() offset corruption)
- *   - Volume-weighted excitation: alpha * ln(1 + size / baseSize)
- *   - Strict side validation: 'B' (Buy) vs 'A' (Sell)
- *   - Spectral radius stability validation
- *   - O(1) analytical recursive exponential decay
+ * Hawkes Point Process Microstructural Volatility Estimator
+ * 
+ * Production quantitative model for high-frequency trade arrival intensity
+ * and self-exciting liquidity cascade detection on Hyperliquid L1:
+ * 
+ * λ(t) = μ + Σ_{t_i < t} α * e^{-β * (t - t_i)}
+ * 
+ * Where:
+ * - μ: baseline arrival rate (exogenous Poisson intensity)
+ * - α: self-excitation magnitude (jump in intensity per trade execution)
+ * - β: exponential decay rate back to equilibrium
+ * - Branching ratio η = α / β: critical threshold where η -> 1.0 triggers
+ *   endogenous volatility cascades, order book thinning, and toxic flow warnings.
  */
 
-export interface HawkesConfig {
-  muBuy?: number;
-  muSell?: number;
-  beta?: number; // decay parameter (s^-1)
-  alphaSelf?: number;
-  alphaCross?: number;
-  baseTradeSize?: number;
+export interface HawkesParameters {
+  mu?: number;    // Baseline rate (default: 0.15)
+  alpha?: number; // Jump magnitude (default: 0.45)
+  beta?: number;  // Decay rate (default: 0.75)
+  windowMs?: number; // Rolling memory window in ms (default: 60,000ms = 1 min)
 }
 
-export interface HawkesState {
-  lambdaBuy: number;
-  lambdaSell: number;
-  hnir: number; // Hawkes Net Intensity Ratio in [-1, +1]
-  lastUpdateMs: number;
-  isStationary: boolean;
+export interface HawkesMetrics {
+  intensity: number;
+  baseline: number;
+  branchingRatio: number;
+  isCascadeRisk: boolean;
+  eventCount: number;
+  halfLifeMs: number;
+  lastEventTimeMs: number;
 }
 
-export class HawkesIntensityService {
-  private readonly muBuy: number;
-  private readonly muSell: number;
-  private readonly beta: number;
-  private readonly alphaSelf: number;
-  private readonly alphaCross: number;
-  private readonly baseTradeSize: number;
-  private readonly isStationary: boolean;
+export class HawkesVolatilityEstimator {
+  private mu: number;
+  private alpha: number;
+  private beta: number;
+  private windowMs: number;
+  private eventTimestamps: number[] = [];
 
-  private rBB = 0.0;
-  private rBA = 0.0;
-  private rAB = 0.0;
-  private rAA = 0.0;
-  private lastUpdateMs = 0; // 0 denotes uninitialized until first event timestamp arrives
-
-  constructor(cfg: HawkesConfig = {}) {
-    this.muBuy = cfg.muBuy ?? 0.10;
-    this.muSell = cfg.muSell ?? 0.10;
-    this.beta = cfg.beta ?? 1.20;
-    this.alphaSelf = cfg.alphaSelf ?? 0.40;
-    this.alphaCross = cfg.alphaCross ?? 0.10;
-    this.baseTradeSize = cfg.baseTradeSize ?? 0.05;
-
-    // Stationarity condition: spectral radius (alpha_self + alpha_cross) / beta < 1
-    const spectralRadius = (this.alphaSelf + this.alphaCross) / this.beta;
-    this.isStationary = spectralRadius < 1.0;
+  constructor(params?: HawkesParameters) {
+    this.mu = params?.mu ?? 0.15;
+    this.alpha = params?.alpha ?? 0.45;
+    this.beta = params?.beta ?? 0.75;
+    this.windowMs = params?.windowMs ?? 60_000;
   }
 
   /**
-   * Apply exponential decay from lastUpdateMs to current event time.
+   * Record a new trade arrival or microstructural tick event.
    */
-  private decay(currentMs: number): void {
-    if (this.lastUpdateMs === 0) {
-      this.lastUpdateMs = currentMs;
-      return;
-    }
+  recordEvent(timestampMs: number = Date.now()): void {
+    this.eventTimestamps.push(timestampMs);
+    this.pruneOldEvents(timestampMs);
+  }
 
-    const dt = (currentMs - this.lastUpdateMs) / 1000.0;
-    if (dt > 0) {
-      const factor = Math.exp(-this.beta * dt);
-      this.rBB *= factor;
-      this.rBA *= factor;
-      this.rAB *= factor;
-      this.rAA *= factor;
-      this.lastUpdateMs = currentMs;
+  /**
+   * Remove events outside the active rolling memory window.
+   */
+  private pruneOldEvents(currentTimeMs: number): void {
+    const cutoff = currentTimeMs - this.windowMs;
+    // Binary search or filter for sliding window
+    while (this.eventTimestamps.length > 0 && this.eventTimestamps[0] < cutoff) {
+      this.eventTimestamps.shift();
     }
   }
 
   /**
-   * Record a new trade event.
-   *
-   * @param rawSide Trade side: 'B' | 'BUY' (Buyer taker) or 'A' | 'SELL' (Seller taker)
-   * @param size Trade size in asset units (used for volume-modulated excitation)
-   * @param eventTimeMs Exchange event timestamp in epoch milliseconds
+   * Compute current conditional intensity λ(t) at time t.
    */
-  public recordTrade(
-    rawSide: string,
-    size = 0.05,
-    eventTimeMs?: number,
-  ): HawkesState | null {
-    const sideNorm = rawSide.toUpperCase();
-    const isBuy = sideNorm === 'B' || sideNorm === 'BUY';
-    const isSell = sideNorm === 'A' || sideNorm === 'SELL';
+  getIntensity(currentTimeMs: number = Date.now()): number {
+    this.pruneOldEvents(currentTimeMs);
 
-    // Strict validation: Reject unknown sides
-    if (!isBuy && !isSell) {
-      return null;
+    let excitationSum = 0;
+    const currentSec = currentTimeMs / 1000;
+
+    for (let i = 0; i < this.eventTimestamps.length; i++) {
+      const eventSec = this.eventTimestamps[i] / 1000;
+      const deltaT = currentSec - eventSec;
+      if (deltaT >= 0) {
+        excitationSum += Math.exp(-this.beta * deltaT);
+      }
     }
 
-    const t = eventTimeMs !== undefined && eventTimeMs > 0 ? eventTimeMs : Date.now();
-    this.decay(t);
-
-    // Volume-modulated excitation
-    const volWeight = Math.log(1.0 + Math.max(0.0001, size) / this.baseTradeSize);
-    const selfInc = this.alphaSelf * volWeight;
-    const crossInc = this.alphaCross * volWeight;
-
-    if (isBuy) {
-      this.rBB += selfInc;
-      this.rAB += crossInc;
-    } else {
-      this.rAA += selfInc;
-      this.rBA += crossInc;
-    }
-
-    return this.getIntensities(t);
+    return this.mu + this.alpha * excitationSum;
   }
 
   /**
-   * Compute instantaneous intensities and the Hawkes Net Intensity Ratio (HNIR).
+   * Branching ratio η = α / β.
+   * If η >= 0.85, the system is in a high-risk self-exciting cascade state.
    */
-  public getIntensities(queryMs?: number): HawkesState {
-    const t = queryMs !== undefined && queryMs > 0 ? queryMs : (this.lastUpdateMs > 0 ? this.lastUpdateMs : Date.now());
-    this.decay(t);
+  getBranchingRatio(): number {
+    return Number((this.alpha / this.beta).toFixed(4));
+  }
 
-    const lambdaBuy = this.muBuy + this.rBB + this.rBA;
-    const lambdaSell = this.muSell + this.rAB + this.rAA;
-    const total = lambdaBuy + lambdaSell;
-    const hnir = total > 0 ? (lambdaBuy - lambdaSell) / total : 0.0;
+  /**
+   * Detect whether current intensity indicates a self-exciting cascade.
+   */
+  isCascadeRisk(currentTimeMs: number = Date.now()): boolean {
+    const intensity = this.getIntensity(currentTimeMs);
+    const branchingRatio = this.getBranchingRatio();
+
+    // Cascade detected if intensity exceeds 4x baseline OR branching ratio is near-critical with surging flow
+    const intensitySurge = intensity > this.mu * 3.5;
+    const nearCritical = branchingRatio >= 0.85 && intensity > this.mu * 2.0;
+
+    return intensitySurge || nearCritical;
+  }
+
+  /**
+   * Return comprehensive telemetry snapshot for TUI and AI context injection.
+   */
+  getMetrics(currentTimeMs: number = Date.now()): HawkesMetrics {
+    const intensity = this.getIntensity(currentTimeMs);
+    const branchingRatio = this.getBranchingRatio();
+    const halfLifeMs = Math.round((Math.LN2 / this.beta) * 1000);
+    const lastEventTime = this.eventTimestamps.length > 0 
+      ? this.eventTimestamps[this.eventTimestamps.length - 1] 
+      : currentTimeMs;
 
     return {
-      lambdaBuy,
-      lambdaSell,
-      hnir,
-      lastUpdateMs: this.lastUpdateMs,
-      isStationary: this.isStationary,
+      intensity: Number(intensity.toFixed(4)),
+      baseline: this.mu,
+      branchingRatio,
+      isCascadeRisk: this.isCascadeRisk(currentTimeMs),
+      eventCount: this.eventTimestamps.length,
+      halfLifeMs,
+      lastEventTimeMs: lastEventTime,
     };
+  }
+
+  /**
+   * Dynamically calibrate model parameters based on historical trade intervals.
+   */
+  calibrate(interArrivalTimesSec: number[]): void {
+    if (!interArrivalTimesSec || interArrivalTimesSec.length < 5) return;
+
+    const n = interArrivalTimesSec.length;
+    const meanInterval = interArrivalTimesSec.reduce((a, b) => a + b, 0) / n;
+    
+    // Sane heuristic updates bounded within stable regions
+    this.mu = Math.max(0.05, Math.min(0.5, 1 / (meanInterval * 2)));
+    this.alpha = Math.max(0.1, Math.min(0.8, this.mu * 2.5));
+    this.beta = Math.max(this.alpha * 1.1, 0.5); // Ensure sub-critical stability (alpha < beta)
+  }
+
+  /**
+   * Reset the event history.
+   */
+  reset(): void {
+    this.eventTimestamps = [];
   }
 }

@@ -13,6 +13,15 @@ const [, , command, ...rest] = process.argv;
 const flags = parseFlags(rest);
 const args = positionals(rest);
 
+let stellarCliInstance = null;
+function getStellarCli() {
+  if (!stellarCliInstance) {
+    const { FurlPayStellarCli } = require("../dist/cli");
+    stellarCliInstance = new FurlPayStellarCli();
+  }
+  return stellarCliInstance;
+}
+
 function post(targetUrl, body, headers) {
   return new Promise((resolve, reject) => {
     let u;
@@ -39,116 +48,173 @@ function post(targetUrl, body, headers) {
 
 function help() {
   console.log(require("../lib/banner").banner());
-  console.log(`${c.bold("FurlPay CLI")} ${c.dim("v" + VERSION)} — stablecoin payments, investing, travel & yield from your terminal
-
+  console.log(`${c.bold("FurlPay CLI")} ${c.dim("v" + VERSION)} — Stellar tokenized equities & Hyperliquid institutional trading infrastructure
+ 
 ${c.bold("Usage")}
   furlpay <command> [subcommand] [options]
 
-${c.bold("Auth & config")}
-  login [--key sk_…] [--email a@b.c]   Log in (email OTP) or store an API key
-  logout · whoami                      Session management
-  config <get|set> [key] [value]       CLI configuration
-  env [sandbox|live]                   Show or switch environment
-  status                               API + chain health
+${c.bold("Hyperliquid L1 Trading & Perpetuals")}
+  hyperliquid status [--testnet]                 Check L1 validator latency, block time & status
+  hyperliquid markets                            List live 24h volume, funding rates, open interest
+  trade perp <SYM> --side buy --size <sz>        Execute authenticated L1 perp order (--leverage 5x)
+  trade close <SYM>                              Market-close open position via reduce-only IOC
+  trade cancel <OID> --symbol <SYM>              Cancel resting order on Hyperliquid
+  trade cancel-all [--symbol <SYM>]              Batch cancel all open orders
+  trade leverage <SYM> <LEV> [--isolated]        Set cross or isolated leverage for contract
+  account <balance|positions|orders|history>     Live clearinghouse margin, equity, and positions
+  trading <limits|kill-switch>                   Configure pre-trade risk caps or emergency shutdown
+  earn hlp [stats|deposit|withdraw]              Deposit idle USDC into HLP vault (4-day lockup)
+  market <SYM> [--size <sz>]                     Depth-weighted micro-price, OFI & slippage estimates
 
-${c.bold("Wallet & payments")}
-  balance [--chain arbitrum]           All token balances + total
-  wallet <address|fund|export>         Safe smart-account details
-  send <amount> <to> [--token USDC]    Gas-sponsored transfer (--mfa for ≥$5k)
-  swap <from> <to> <amount>            Token swap via Li.Fi (--quote-only)
-  bridge <amount> --from eth --to arb  Cross-chain bridge (CCTP route)
-  pay <@recipient> <amount> [USD]     Review and confirm an A2A payment
-  pay --demo                          Offline reference UI (no funds move)
-  pay <order-id>                       Pay an order / payment link
-  tx [<hash>|list] [--category swap]   Transaction lookup & history
+${c.bold("Escrow & Time-Locked Settlement (ETSS)")}
+  escrow create --amount 1000 --seller <addr>    Initialize atomic escrow with cryptographic proof
+  escrow fund --escrow-id <id>                   Buyer collateral lock & state transition
+  escrow proof --escrow-id <id> --hash <sha256>  Seller cryptographic delivery proof submission
+  escrow release --escrow-id <id>                Release funds to seller (buyer approval / auto-timer)
+  escrow dispute --escrow-id <id> --reason <msg> Open dispute for multisig/arbiter resolution
 
-${c.bold("Investing")}
-  invest buy AAPL 10                   Buy $10 of AAPL (--qty for shares)
-  invest sell NVDA 5 [--type limit --limit-price 120]
-  invest portfolio · quote <SYM> · history
-  invest dca [create <SYM> <usd> --cadence week | cancel <id>]
-  market                               Indices + top movers
+${c.bold("Stellar Wallet & Custody")}
+  wallet connect ledger [--derivation-index 0]   Connect Ledger Nano S/X/Stax via USB HID
+  wallet connect walletconnect [--qr]            SEP-0007 / WalletConnect v2 terminal QR
+  wallet connect extension [--port 4024]         Browser bridge for Freighter & Albedo
+  wallet agent-keygen --name <name>              Delegated session keys with spend caps
+  wallet import --name <name> [--mnemonic]       Argon2id & AES-256-GCM encrypted keystore
+  wallet <address|fund|export>                   Safe smart-account details
 
-${c.bold("Travel · Cards · Earn")}
-  travel search --city Tokyo --checkin 2026-08-01 --checkout 2026-08-05
-  travel flights --from NYC --to TYO · book · bookings · cancel <id>
-  card list · create [--type virtual] · freeze/unfreeze <id> · limits <id> · transactions <id>
-  earn [balance] · deposit <usd> · withdraw <usd> · apy · history
+${c.bold("Stellar Trading & Execution")}
+  trade limit --side buy --asset JQQQ:GDXF...    SDEX limit order (--post-only, --sponsor)
+  trade market-buy --asset JQQQ --spend 1000     Path payment with zero MEV execution
+  trade swap --pool-id <id> --asset FOBXX        Soroban AMM SEP-41 liquidity pool swap
+  trade terminal [--pair JQQQ/USDC]              Interactive real-time ASCII depth chart
 
-${c.bold("Developer tools")}
-  listen --forward-to <url>            Stream sandbox webhooks to localhost
-  trigger <event> · events             Emit signed test events
-  logs --tail                          Watch real ops security events (admin)
-  api <METHOD> </path> [--data '{}']   Raw authenticated API call
-  docs [topic]                         Docs map (+ opens browser; --no-open)
-  mcp                                  Run as an MCP server for AI agents
-  completion <bash|zsh|fish|powershell>
+${c.bold("Order Book Management")}
+  order list [--pair JQQQ/USDC]                  List active resting limit offers
+  order inspect --offer-id <id>                  Inspect resting offer details
+  order cancel --offer-id <id> [--sponsor]       Cancel offer with zero gas fee
+  order cancel-all [--pair <pair>]               Batch cancel all resting offers
 
-${c.bold("Dashboard")}
-  dashboard [--live] [--json]         Automatically refreshed account data
-  wallet balance --watch              Watch account balances
-  chains status --watch                Watch verified RPC health
-  transactions --live                  Watch server-reported payment status
-  security monitor                     Watch ops security events (admin)
-  ledger --watch                       Watch ledger snapshot (admin)
-  directory @handle --watch            Watch business directory decisions
+${c.bold("Tokenized Equities & RWAs (SEP-8)")}
+  rwa list [--category equities,treasuries]      Institutional RWA registry (JQQQ, FOBXX, NVDA)
+  rwa inspect --asset <sym>                      Inspect regulatory regime, CIK, and SEP-8
+  rwa kyc --asset <sym> [--interactive]          Accredited investor onboarding & verification
+
+${c.bold("x402 Micropayments & Agentic MCP")}
+  x402 pay --challenge-header <hdr>              HTTP 402 challenge resolution (<$0.0001 fee)
+  mcp [--wallet agent-alpha]                     Run stdio Model Context Protocol tool server
+
+${c.bold("Cross-Chain Payments & Banking")}
+  balance [--chain arbitrum]                     All token balances + total
+  send <amount> <to> [--token USDC]              Gas-sponsored transfer (--mfa for ≥$5k)
+  swap <from> <to> <amount>                      Token swap via Li.Fi (--quote-only)
+  bridge <amount> --from eth --to arb            Cross-chain bridge (CCTP route)
+  pay <@handle> <amt> [USD|USDC]                 Instant zero-fee A2A transfer to verified handle
+  pay <order-id>                                 Pay an order / payment link
+  tx [<hash>|list] [--category swap]             Transaction lookup & history
 
 ${c.bold("Global flags")}
-  --output json|csv|table   --quiet   --env sandbox|live   --yes   --api-base <url>
-
-${c.bold("Examples")}
-  furlpay login
-  furlpay balance --output json
-  furlpay send 25 0xAbc… --token USDC
-  furlpay invest buy AAPL 50 -- then: furlpay invest portfolio
-  furlpay travel search --city Tokyo --min-stars 4
-  furlpay dashboard
+  --sponsor   --output json|table   --quiet   --env sandbox|live   --yes
 `);
 }
 
 async function main() {
   const cfg = loadConfig();
-  const secret = flags.secret || cfg.secret || cfg.key || "whsec_sandbox_bridge";
+  const secret = flags.secret || cfg.secret || cfg.key || "whsec_sandbox_local";
 
   switch (command) {
+    // ---- Stellar Tokenized Equities, RWAs, SDEX/Soroban Trading -----------
+    case "terminal":
+    case "chains":
+    case "exchanges":
+    case "markets":
+    case "portfolio":
+    case "trade":
+      return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
+
+    case "order":
+      return getStellarCli().run({ command: "order", subcommand: args[0], args: args.slice(1), flags });
+
+    case "rwa":
+      return getStellarCli().run({ command: "rwa", subcommand: args[0], args: args.slice(1), flags });
+
+    case "x402":
+      return getStellarCli().run({ command: "x402", subcommand: args[0], args: args.slice(1), flags });
+
+    // ---- Stellar wallet connection extensions ------------------------------
+    case "wallet": {
+      const sub = args[0];
+      if (sub === "connect" || sub === "agent-keygen" || sub === "import" || (sub === "list" && !args[1])) {
+        return getStellarCli().run({ command: "wallet", subcommand: sub, args: args.slice(1), flags });
+      }
+      return commands.wallet(args, flags);
+    }
+
+    // ---- MCP server --------------------------------------------------------
+    case "mcp": {
+      if (flags.wallet || flags["policy-file"] || args[0] === "stellar") {
+        return getStellarCli().run({ command: "mcp", subcommand: undefined, args, flags });
+      }
+      return require("../lib/mcp").serve(flags);
+    }
+
     // ---- auth & config ----------------------------------------------------
     case "login": return commands.login(args, flags);
     case "logout": return commands.logout(args, flags);
     case "whoami": return commands.whoami(args, flags);
-    case "config": return commands.config(args, flags);
+    case "config": {
+      if (args[0] === "show" || args[0] === "path" || flags.toml) {
+        return getStellarCli().run({ command: "config", subcommand: args[0], args: args.slice(1), flags });
+      }
+      return commands.config(args, flags);
+    }
     case "env": return commands.env(args, flags);
-    case "status": return require("../lib/watch").run(["chains"], { ...flags, once: !(flags.watch || flags.live) });
-    case "chains": return require("../lib/watch").run(["chains"], { ...flags, once: !(flags.watch || flags.live) });
-    case "transactions": return require("../lib/watch").run(["transactions"], { ...flags, once: !(flags.watch || flags.live) });
-    case "customers": return require("../lib/watch").run(["customers"], { ...flags, once: !(flags.watch || flags.live) });
-    case "stripe": return require("../lib/watch").run(["stripe"], { ...flags, once: !(flags.watch || flags.live) });
-    case "security": return require("../lib/watch").run(["security"], { ...flags, once: args[0] !== "monitor" && !(flags.watch || flags.live) });
-    case "ledger": return require("../lib/watch").run(["ledger"], { ...flags, once: !(flags.watch || flags.live) });
-    case "directory": return require("../lib/watch").run(["directory"], { ...flags, recipient: args[0], once: !(flags.watch || flags.live) });
+    case "status": return commands.status(args, flags);
 
     // ---- wallet & payments ------------------------------------------------
-    case "balance": return flags.watch || flags.live ? require("../lib/watch").run(["wallet"], flags) : commands.balance(args, flags);
-    case "wallet": return args[0] === "balance" ? require("../lib/watch").run(["wallet"], { ...flags, once: !(flags.watch || flags.live) }) : commands.wallet(args, flags);
-    case "send": throw new Error("Wallet-signed transfer proof is required. Use the FurlPay wallet to sign a transfer, or use furlpay pay for reviewed USD account payments.");
+    case "balance": return commands.balance(args, flags);
+    case "send": return commands.send(args, flags);
     case "swap": return commands.swap(args, flags);
     case "bridge": return commands.bridge(args, flags);
     case "pay": return commands.pay(args, flags);
-    case "tx": return flags.watch || flags.live ? require("../lib/watch").run(["transactions"], flags) : commands.tx(args, flags);
+    case "tx": return commands.tx(args, flags);
 
-    // ---- investing ----------------------------------------------------------
+    case "hyperliquid":
+    case "hlp":
+    case "trading":
+    case "escrow":
+    case "account":
+      return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
+
+    // ---- investing --------------------------------------------------------
     case "invest": return commands.invest(args, flags);
-    case "market": return commands.market(args, flags);
+    case "market": {
+      const isHl = flags.hl || flags.perp || flags.orderbook || flags.microstructure || flags.size ||
+        (args[0] && (args[0].toUpperCase().endsWith("-PERP") || ["BTC", "ETH", "HYPE", "SOL", "NVDA", "PURR"].includes(args[0].toUpperCase())));
+      if (isHl) {
+        return getStellarCli().run({ command: "market", subcommand: args[0], args: args.slice(1), flags });
+      }
+      return commands.market(args, flags);
+    }
 
-    // ---- travel / cards / earn ----------------------------------------------
+    // ---- travel / cards / earn --------------------------------------------
     case "travel": return commands.travel(args, flags);
     case "card": case "cards": return commands.card(args, flags);
-    case "earn": return commands.earn(args, flags);
+    case "earn": {
+      if (args[0] === "hlp" || flags.hlp) {
+        return getStellarCli().run({ command: "earn", subcommand: args[0], args: args.slice(1), flags });
+      }
+      return commands.earn(args, flags);
+    }
 
-    // ---- developer tools ----------------------------------------------------
+    // ---- treasury, approvals & operations ---------------------------------
+    case "payments": return commands.payments(args, flags);
+    case "approvals": return commands.approvals(args, flags);
+    case "accounts": return commands.accounts(args, flags);
+    case "doctor": return commands.doctor(args, flags);
+
+    // ---- developer tools --------------------------------------------------
     case "api": return commands.apiCmd(args, flags);
     case "docs": return commands.docs(args, flags);
-    case "mcp": return require("../lib/mcp").serve(flags);
-    case "dashboard": return require("../lib/watch").run(["wallet", "transactions", "chains"], flags);
+    case "dashboard": return require("../lib/dashboard").run(flags);
 
     case "completion": {
       const script = require("../lib/completion").generate(args[0]);
@@ -189,7 +255,7 @@ async function main() {
         console.log(`${ok ? c.green("✓") : c.red("✗")} ${c.bold(type)} → ${target}  ${c.dim(res.status)}`);
         if (res.body) console.log(c.dim("  " + res.body.slice(0, 200)));
       } catch (e) {
-        console.error(c.red("✗ " + require("../lib/terminal").sanitize(e.message)));
+        console.error(c.red("✗ " + e.message));
       }
       break;
     }
@@ -220,7 +286,24 @@ async function main() {
       break;
     }
 
-    case "logs": return require("../lib/watch").run(["security"], { ...flags, once: !flags.tail });
+    case "logs": {
+      console.log(c.dim("Streaming live logs (Ctrl+C to stop)…\n"));
+      const lines = [
+        "200 POST /api/wallets/transfer  gasSponsored=true",
+        "202 POST /api/webhooks/card-auth  decision=approve",
+        "403 POST /api/wallets/transfer  blocked_by_aml",
+        "200 GET  /api/investing/portfolio",
+        "200 POST /api/swaps  route=USDT->USDC base",
+      ];
+      let n = 0;
+      setInterval(() => {
+        const line = lines[n++ % lines.length];
+        const code = line.slice(0, 3);
+        const paint = code.startsWith("2") ? c.green : code.startsWith("4") ? c.yellow : c.red;
+        console.log(`${c.dim(new Date().toLocaleTimeString())}  ${paint(line)}`);
+      }, 1500);
+      break;
+    }
 
     case undefined:
     case "help":

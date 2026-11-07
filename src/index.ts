@@ -1,66 +1,56 @@
 /**
- * FurlPay SDK — Programmatic API for x402 payment infrastructure
- *
- * This is the library entry point for using FurlPay as a dependency
- * in Node.js applications. For the CLI, use `furlpay` command.
- *
- * @example
- * ```ts
- * import { MarketDataService, X402Facilitator, WalletService } from '@furlpay/cli';
- *
- * // Fetch live order book from Hyperliquid L1
- * const market = new MarketDataService();
- * const snapshot = await market.getOrderBook('BTC');
- * const metrics = market.calculateMicrostructure(snapshot);
- * console.log(`Micro-Price: $${metrics.microPrice.toFixed(2)}`);
- *
- * // Create x402 payment challenge
- * const facilitator = new X402Facilitator({ networkId: 'eip155:8453' });
- * const challenge = facilitator.createChallenge({
- *   payTo: '0x9A4b...FurlPayOrchestrator',
- *   asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
- *   amount: '2500',
- *   scheme: 'exact',
- * });
- * ```
- *
- * @module @furlpay/cli
+ * FurlPay CLI — Stellar Tokenized Equities, RWAs, Hyperliquid Perps, and Trading Execution Engine
+ * Minimum Cost, Maximum Results
  */
 
-// ── Types ───────────────────────────────────────────────────────────────
-export type {
-  PaymentScheme,
-  NetworkId,
-  PaymentChallenge,
-  PaymentAuthorization,
-  PaymentReceipt,
-  PaymentStatus,
-  OrderBookLevel,
-  OrderBookSnapshot,
-  MicrostructureMetrics,
-  MarketDataConfig,
-  AgentIdentity,
-  SpendingPolicy,
-  AgentSession,
-  FurlPayConfig,
-  CLIContext,
-  EscrowState,
-  SettlementRecord,
-} from './types/index.js';
-
-// ── Services ────────────────────────────────────────────────────────────
-export { MarketDataService } from './services/market-data.js';
-export { X402Facilitator } from './services/x402-facilitator.js';
-export { WalletService } from './services/wallet.js';
-export { BenchmarkService } from './services/benchmark.js';
-
-// ── Utilities ───────────────────────────────────────────────────────────
-export { SUPPORTED_NETWORKS, DEFAULT_NETWORK, X402_VERSION } from './utils/constants.js';
-export { loadConfig, saveConfig } from './utils/config.js';
-export {
-  formatUSD,
-  formatBPS,
-  formatLatency,
-  formatVolume,
-  shortenAddress,
-} from './utils/formatting.js';
+export * from "./types";
+export * from "./config";
+export * from "./wallet/signer";
+export * from "./wallet/ledger";
+export * from "./wallet/walletconnect";
+export * from "./wallet/extension";
+export * from "./wallet/keystore";
+export * from "./wallet/agentKey";
+export * from "./trade/router";
+export * from "./trade/sdex";
+export * from "./trade/pathPayment";
+export * from "./trade/soroban";
+export * from "./order/manager";
+export * from "./compliance/sep8";
+export * from "./sponsor/relayer";
+export * from "./rwa/registry";
+export * from "./x402/micropayments";
+export * from "./hyperliquid/client";
+export * from "./hyperliquid/hlp";
+export * from "./hyperliquid/perp";
+export * from "./hyperliquid/hyperliquid-adapter";
+export * from "./hyperliquid/hyperliquid-signer";
+export * from "./hyperliquid/market-data-engine";
+export * from "./hyperliquid/margin-engine";
+export * from "./hyperliquid/liquidation-engine";
+export * from "./hyperliquid/funding-engine";
+export * from "./hyperliquid/usdc-peg-monitor";
+export * from "./hyperliquid/hlp-vault-monitor";
+export * from "./mcp/server";
+export * from "./tui/terminal";
+export * from "./tui/interactive-terminal";
+export * from "./tui/institutional-workstation";
+export * from "./tui/render/differential-engine";
+export * from "./tui/chart/candlestick";
+export * from "./engine";
+export * from "./precision/decimal-math";
+export * from "./order/lifecycle-manager";
+export * from "./execution/authorization-service";
+export * from "./reconciliation/exchange-reconciler";
+export * from "./market/recovery-engine";
+export * from "./blotter/durable-event-store";
+export * from "./services/furlpay-feed";
+export * from "./services/hyperliquid-feed";
+export * from "./services/risk-engine";
+export * from "./services/http-agent";
+export * from "./services/hawkes";
+export * from "./services/market-data";
+export * from "./market/types";
+export * from "./market/registry";
+export * from "./market/discovery";
+export * from "./cli";

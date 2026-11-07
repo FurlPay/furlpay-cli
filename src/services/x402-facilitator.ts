@@ -1,211 +1,245 @@
-// ─────────────────────────────────────────────────────────────
-//  FurlPay CLI — x402 Facilitator Service
-// ─────────────────────────────────────────────────────────────
+/**
+ * FurlPay x402 Micropayment Facilitator & EIP-712 Signature Verification Engine
+ * 
+ * Provides production-grade cryptographic signature recovery and authorization
+ * verification for HTTP 402 agent payments.
+ * 
+ * Cryptographic invariants:
+ * 1. EIP-712 typed signature recovery (EIP-3009 transferWithAuthorization).
+ * 2. Strict payer binding: recovered signer MUST strictly match authorization.from.
+ * 3. Domain binding: chainId, token contract address, name, version.
+ * 4. Recipient binding: authorization.to MUST match requirement payTo.
+ * 5. Amount binding: authorization.value MUST cover required payment.
+ * 6. Validity window: validAfter <= now <= validBefore.
+ * 7. Nonce replay protection: each 32-byte nonce can only be consumed once.
+ * 8. Zero fake-signature fallback: invalid/zero signatures are strictly rejected.
+ */
 
-import crypto from 'node:crypto';
-import { ethers } from 'ethers';
-import type {
-  PaymentChallenge,
-  PaymentAuthorization,
-  PaymentReceipt,
-  PaymentScheme,
-} from '../types/index.js';
-import { FACILITATOR_DEFAULT_URL, SUPPORTED_NETWORKS } from '../utils/constants.js';
+import { ethers } from "ethers";
 
-/** EIP-712 domain & types for EIP-3009 `transferWithAuthorization`. */
-const EIP3009_TYPES: Record<string, ethers.TypedDataField[]> = {
+export interface AuthorizationPayload {
+  from: string;
+  to: string;
+  value: string;
+  validAfter: string;
+  validBefore: string;
+  nonce: string;
+}
+
+export interface PaymentRequirement {
+  scheme: string;
+  network: string;
+  asset: string; // Token contract address
+  payTo: string;
+  maxAmountRequired: string;
+  domainName?: string;
+  domainVersion?: string;
+  extra?: Record<string, any>;
+}
+
+export interface VerificationVerdict {
+  verified: boolean;
+  reason?: string;
+  recoveredSigner?: string;
+}
+
+export const EVM_CHAIN_IDS: Record<string, number> = {
+  arbitrum: 42161,
+  "arbitrum-sepolia": 421614,
+  base: 8453,
+  "base-sepolia": 84532,
+  polygon: 137,
+  ethereum: 1,
+  arc: 5042,
+  "arc-testnet": 5042002,
+};
+
+export const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
-    { name: 'from', type: 'address' },
-    { name: 'to', type: 'address' },
-    { name: 'value', type: 'uint256' },
-    { name: 'validAfter', type: 'uint256' },
-    { name: 'validBefore', type: 'uint256' },
-    { name: 'nonce', type: 'bytes32' },
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "validAfter", type: "uint256" },
+    { name: "validBefore", type: "uint256" },
+    { name: "nonce", type: "bytes32" },
   ],
 };
 
-export interface X402FacilitatorOptions {
-  networkId: string;
-  facilitatorUrl?: string;
-  privateKey?: string;
-}
-
-export interface CreateChallengeParams {
-  payTo: string;
-  asset?: string;
-  amount: string;
-  networkId?: string;
-  scheme?: string;
-  expiry?: number;
-}
-
-/**
- * Facilitator that creates, verifies, and settles x402 payment challenges.
- */
 export class X402Facilitator {
-  private readonly networkId: string;
-  private readonly facilitatorUrl: string;
-  private readonly wallet: ethers.Wallet | null;
-
-  constructor(opts: X402FacilitatorOptions) {
-    this.networkId = opts.networkId;
-    this.facilitatorUrl = opts.facilitatorUrl ?? FACILITATOR_DEFAULT_URL;
-    this.wallet = opts.privateKey ? new ethers.Wallet(opts.privateKey) : null;
-  }
-
-  // ── Challenge creation ───────────────────────────────────
+  private consumedNonces: Set<string> = new Set();
 
   /**
-   * Generate a new x402 payment challenge with a unique nonce.
+   * Cryptographically verify an incoming EIP-712 transfer authorization against payment requirements.
    */
-  createChallenge(params: CreateChallengeParams): PaymentChallenge {
-    const defaultExpiryMs = 5 * 60 * 1000; // 5 minutes
-    const network = params.networkId ?? this.networkId;
-    const netCfg = SUPPORTED_NETWORKS.get(network);
-    const asset = params.asset ?? netCfg?.usdcAddress ?? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  async verifyAuthorization(
+    auth: AuthorizationPayload,
+    signature: string,
+    requirements: PaymentRequirement,
+    currentTimeSeconds?: number
+  ): Promise<VerificationVerdict> {
+    // 1. Strict signature syntax and zero-filled check
+    if (!signature || typeof signature !== "string") {
+      return { verified: false, reason: "missing_signature" };
+    }
+    const cleanSig = signature.trim().toLowerCase();
+    if (!/^0x[0-9a-f]{130}$/.test(cleanSig) && !/^0x[0-9a-f]{132}$/.test(cleanSig)) {
+      return { verified: false, reason: "bad_signature_format" };
+    }
 
-    const expiryTime = params.expiry
-      ? new Date(Date.now() + params.expiry * 1000).toISOString()
-      : new Date(Date.now() + defaultExpiryMs).toISOString();
+    // Reject zero-filled signatures (all zeros in r, s, or entire signature)
+    const rawBytes = cleanSig.replace(/^0x/, "");
+    if (/^0+$/.test(rawBytes)) {
+      return { verified: false, reason: "zero_filled_signature_rejected" };
+    }
 
-    return {
-      networkId: network,
-      payTo: params.payTo,
-      asset,
-      amount: params.amount,
-      nonce: crypto.randomUUID(),
-      scheme: (params.scheme as PaymentScheme) ?? 'exact',
-      expiry: expiryTime,
+    // 2. Format validation on addresses and fields
+    if (!ethers.isAddress(auth.from)) {
+      return { verified: false, reason: "invalid_from_address" };
+    }
+    if (!ethers.isAddress(auth.to)) {
+      return { verified: false, reason: "invalid_to_address" };
+    }
+    if (!ethers.isAddress(requirements.asset)) {
+      return { verified: false, reason: "invalid_token_contract_address" };
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(auth.nonce)) {
+      return { verified: false, reason: "invalid_nonce_format" };
+    }
+
+    // Decimal numeric validation
+    if (!/^[0-9]+$/.test(auth.value) || !/^[0-9]+$/.test(auth.validAfter) || !/^[0-9]+$/.test(auth.validBefore)) {
+      return { verified: false, reason: "bad_numeric_field" };
+    }
+
+    // 3. Resolve Chain ID
+    const chainId = EVM_CHAIN_IDS[requirements.network.toLowerCase()];
+    if (!chainId) {
+      return { verified: false, reason: `unsupported_network_${requirements.network}` };
+    }
+
+    // 4. Payee binding check
+    if (auth.to.toLowerCase() !== requirements.payTo.toLowerCase()) {
+      return { verified: false, reason: "payee_mismatch" };
+    }
+
+    // 5. Amount sufficiency check
+    const authValue = BigInt(auth.value);
+    const requiredValue = BigInt(requirements.maxAmountRequired);
+    if (authValue < requiredValue) {
+      return { verified: false, reason: "insufficient_authorized_amount" };
+    }
+
+    // 6. Validity window check
+    const now = currentTimeSeconds !== undefined ? currentTimeSeconds : Math.floor(Date.now() / 1000);
+    const validAfter = BigInt(auth.validAfter);
+    const validBefore = BigInt(auth.validBefore);
+    if (BigInt(now) < validAfter) {
+      return { verified: false, reason: "authorization_not_yet_valid" };
+    }
+    if (BigInt(now) > validBefore) {
+      return { verified: false, reason: "authorization_expired" };
+    }
+
+    // 7. Replay protection check
+    const replayKey = `${requirements.network}:${requirements.asset.toLowerCase()}:${auth.from.toLowerCase()}:${auth.nonce.toLowerCase()}`;
+    if (this.consumedNonces.has(replayKey)) {
+      return { verified: false, reason: "nonce_already_consumed" };
+    }
+
+    // 8. EIP-712 Signature Recovery
+    const domain = {
+      name: requirements.domainName || "USD Coin",
+      version: requirements.domainVersion || "2",
+      chainId,
+      verifyingContract: requirements.asset,
     };
-  }
 
-  // ── Authorization verification ───────────────────────────
+    const message = {
+      from: auth.from,
+      to: auth.to,
+      value: BigInt(auth.value),
+      validAfter: BigInt(auth.validAfter),
+      validBefore: BigInt(auth.validBefore),
+      nonce: auth.nonce,
+    };
 
-  /**
-   * Verify an EIP-3009 signed authorization against the original challenge.
-   */
-  verifyAuthorization(
-    challenge: PaymentChallenge,
-    auth: PaymentAuthorization,
-  ): { valid: boolean; signer?: string; reason?: string } {
+    let recoveredSigner: string;
     try {
-      // Consistency checks
-      const authTo = auth.to ?? challenge.payTo;
-      if (authTo.toLowerCase() !== challenge.payTo.toLowerCase()) {
-        return { valid: false, reason: 'Payee address does not match challenge' };
-      }
+      recoveredSigner = ethers.verifyTypedData(
+        domain,
+        TRANSFER_WITH_AUTHORIZATION_TYPES,
+        message,
+        cleanSig
+      );
+    } catch (e: any) {
+      return { verified: false, reason: `signature_recovery_failed: ${e.message}` };
+    }
 
-      if (auth.nonce !== challenge.nonce) {
-        return { valid: false, reason: 'Nonce mismatch' };
-      }
-
-      const expiryNum = typeof challenge.expiry === 'string'
-        ? new Date(challenge.expiry).getTime()
-        : challenge.expiry;
-
-      if (Date.now() > expiryNum) {
-        return { valid: false, reason: 'Payment challenge has expired' };
-      }
-
-      // Check signature format
-      if (!auth.signature || !auth.signature.startsWith('0x')) {
-        return { valid: false, reason: 'Malformed signature' };
-      }
-
+    // 9. Signer equality check
+    if (recoveredSigner.toLowerCase() !== auth.from.toLowerCase()) {
       return {
-        valid: true,
-        signer: auth.payer,
+        verified: false,
+        reason: "signer_mismatch",
+        recoveredSigner,
       };
-    } catch (err) {
-      return { valid: false, reason: (err as Error).message };
     }
-  }
 
-  // ── Receipt generation ───────────────────────────────────
+    // Mark nonce consumed
+    this.consumedNonces.add(replayKey);
 
-  generateReceipt(
-    challenge: PaymentChallenge,
-    txHash: string,
-    blockNumber: number,
-  ): PaymentReceipt {
     return {
-      txHash,
-      blockNumber,
-      timestamp: Math.floor(Date.now() / 1000),
-      networkId: challenge.networkId,
-      amount: challenge.amount,
-      status: 'settled',
-      challengeNonce: challenge.nonce,
+      verified: true,
+      recoveredSigner,
     };
   }
 
-  private chainIdFromNetwork(): number {
-    const parts = this.networkId.split(':');
-    if (parts[0] === 'eip155' && parts[1]) {
-      const parsed = parseInt(parts[1], 10);
-      if (!isNaN(parsed)) return parsed;
+  /**
+   * Helper to sign an authorization using a concrete wallet signer.
+   * STRICT SECURITY: Throws an error if no wallet is provided. Never returns a fake or zeroed signature.
+   */
+  async signAuthorization(
+    signerWallet: ethers.Signer | null | undefined,
+    auth: AuthorizationPayload,
+    requirements: PaymentRequirement
+  ): Promise<string> {
+    if (!signerWallet) {
+      throw new Error(
+        "Cryptographic signing failure: No valid wallet or private key supplied. Zero-filled or dummy signature generation is strictly forbidden."
+      );
     }
-    const cfg = SUPPORTED_NETWORKS.get(this.networkId);
-    return cfg?.chainId ?? 8453;
-  }
-}
 
-// ── Standalone helper functions ───────────────────────────────
+    const chainId = EVM_CHAIN_IDS[requirements.network.toLowerCase()];
+    if (!chainId) {
+      throw new Error(`Unsupported network: ${requirements.network}`);
+    }
 
-export async function createChallenge(params: CreateChallengeParams): Promise<PaymentChallenge> {
-  const facilitator = new X402Facilitator({
-    networkId: params.networkId ?? 'eip155:8453',
-  });
-  return facilitator.createChallenge(params);
-}
-
-export async function signAuthorization(
-  challenge: PaymentChallenge,
-  wallet: { address: string; signPaymentAuth?: (c: PaymentChallenge) => Promise<PaymentAuthorization>; privateKey?: string },
-): Promise<PaymentAuthorization> {
-  if (wallet.signPaymentAuth) {
-    return wallet.signPaymentAuth(challenge);
-  }
-  return {
-    signature: '0x' + '00'.repeat(65),
-    payer: wallet.address,
-    nonce: challenge.nonce,
-    to: challenge.payTo,
-    value: challenge.amount,
-  };
-}
-
-export async function verifyAuthorization(
-  challenge: PaymentChallenge,
-  authorization: PaymentAuthorization,
-): Promise<{ valid: boolean; signer?: string; reason?: string }> {
-  const facilitator = new X402Facilitator({ networkId: challenge.networkId });
-  return facilitator.verifyAuthorization(challenge, authorization);
-}
-
-export async function lookupTransaction(
-  txHash: string,
-  networkId: string,
-): Promise<PaymentReceipt | null> {
-  const cfg = SUPPORTED_NETWORKS.get(networkId);
-  if (!cfg) return null;
-
-  try {
-    const provider = new ethers.JsonRpcProvider(cfg.rpcUrl);
-    const tx = await provider.getTransaction(txHash);
-    if (!tx) return null;
-
-    const receipt = await provider.getTransactionReceipt(txHash);
-
-    return {
-      txHash,
-      blockNumber: receipt?.blockNumber ?? tx.blockNumber ?? 0,
-      timestamp: Math.floor(Date.now() / 1000),
-      networkId,
-      amount: ethers.formatUnits(tx.value, 6),
-      status: receipt ? (receipt.status === 1 ? 'settled' : 'failed') : 'pending',
+    const domain = {
+      name: requirements.domainName || "USD Coin",
+      version: requirements.domainVersion || "2",
+      chainId,
+      verifyingContract: requirements.asset,
     };
-  } catch {
-    return null;
+
+    const message = {
+      from: auth.from,
+      to: auth.to,
+      value: BigInt(auth.value),
+      validAfter: BigInt(auth.validAfter),
+      validBefore: BigInt(auth.validBefore),
+      nonce: auth.nonce,
+    };
+
+    return await (signerWallet as any).signTypedData(
+      domain,
+      TRANSFER_WITH_AUTHORIZATION_TYPES,
+      message
+    );
+  }
+
+  /**
+   * Reset replay cache (for testing only).
+   */
+  resetCache(): void {
+    this.consumedNonces.clear();
   }
 }
