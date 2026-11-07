@@ -1,0 +1,78 @@
+{
+  "name": "@furlpay/cli",
+  "version": "0.1.0",
+  "description": "FurlPay CLI — Institutional-grade x402 payment facilitation, mainnet CLOB market data, and autonomous agent settlement infrastructure",
+  "author": "FurlPay <engineering@furlpay.io>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FurlPay/furlpay-cli.git"
+  },
+  "homepage": "https://furlpay.io",
+  "keywords": [
+    "furlpay",
+    "x402",
+    "stablecoin",
+    "payment",
+    "settlement",
+    "CLOB",
+    "orderbook",
+    "hyperliquid",
+    "USDC",
+    "agent",
+    "micropayment",
+    "fintech",
+    "DeFi",
+    "tokenization"
+  ],
+  "type": "module",
+  "bin": {
+    "furlpay": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "ethers": "^6.13.4",
+    "ora": "^8.1.1",
+    "ws": "^8.18.0",
+    "inquirer": "^12.2.0",
+    "conf": "^13.0.1",
+    "cli-table3": "^0.6.5",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.5.13",
+    "@types/inquirer": "^9.0.7",
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.5",
+    "rimraf": "^6.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
