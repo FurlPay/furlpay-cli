@@ -22,6 +22,7 @@ import { initCommand } from './commands/init.js';
 import {
   marketOrderbookCommand,
   marketStreamCommand,
+  marketBacktestCommand,
 } from './commands/market.js';
 import {
   payCreateCommand,
@@ -80,6 +81,12 @@ market
   .description('Stream live L2 order book updates via WebSocket')
   .option('-d, --depth <levels>', 'Number of price levels', '10')
   .action(marketStreamCommand);
+
+market
+  .command('backtest <coin>')
+  .description('Run quantitative microstructure backtest (Hawkes, OFI, Imbalance)')
+  .option('-f, --file <path>', 'Historical JSONL recording file path')
+  .action(marketBacktestCommand);
 
 // ── furlpay pay ─────────────────────────────────────────────────────────
 const pay = program
