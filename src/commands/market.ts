@@ -184,114 +184,118 @@ export async function marketBacktestCommand(
   const spinner = ora(`Running quantitative backtest for ${coin}…`).start();
   const fs = await import('fs');
   const path = await import('path');
-  const { QuantitativeBacktestEngine } = await import('../services/backtest.js');
+  const { RobustBacktestEngine } = await import('../services/backtest.js');
+  type MarketFeedEvent = import('../services/backtest.js').MarketFeedEvent;
 
   try {
-    let ticks: any[] = [];
     const filePath = typeof options.file === 'string' ? options.file : null;
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw new Error(
+        `A valid historical JSONL recording file must be specified with --file <path> (e.g. --file session_audit_v2.jsonl). Synthetic data generation is disabled in research backtest mode.`,
+      );
+    }
 
-    if (filePath && fs.existsSync(filePath)) {
-      const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const rec = JSON.parse(line);
-          if (rec.type === 'l2Book' && rec.data?.levels) {
-            const bids = rec.data.levels[0];
-            const asks = rec.data.levels[1];
-            if (bids.length > 0 && asks.length > 0) {
-              ticks.push({
-                timestampMs: rec.exchange_event_time_ms || rec.data.time || Date.now(),
-                bidPrice: parseFloat(bids[0].px),
-                askPrice: parseFloat(asks[0].px),
-                bidSize: parseFloat(bids[0].sz),
-                askSize: parseFloat(asks[0].sz),
+    const events: MarketFeedEvent[] = [];
+    const rawContent = fs.readFileSync(filePath, 'utf-8');
+    const lines = rawContent.split('\n');
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line);
+        const t = rec.exchange_event_time_ms || rec.data?.time || rec.local_receive_time_ns ? Math.floor(rec.local_receive_time_ns / 1_000_000) : Date.now();
+
+        if (rec.type === 'l2Book' && rec.data?.levels) {
+          const bids = rec.data.levels[0];
+          const asks = rec.data.levels[1];
+          if (bids.length > 0 && asks.length > 0) {
+            const bPx = parseFloat(bids[0].px);
+            const aPx = parseFloat(asks[0].px);
+            const bSz = parseFloat(bids[0].sz);
+            const aSz = parseFloat(asks[0].sz);
+
+            if (bPx > 0 && aPx > bPx && bSz > 0 && aSz > 0) {
+              events.push({
+                kind: 'book',
+                timestampMs: t,
+                bidPrice: bPx,
+                askPrice: aPx,
+                bidSize: bSz,
+                askSize: aSz,
               });
             }
-          } else if (rec.type === 'trade' && rec.data) {
-            ticks.push({
-              timestampMs: rec.exchange_event_time_ms || rec.data.time || Date.now(),
-              bidPrice: parseFloat(rec.data.px) - 0.5,
-              askPrice: parseFloat(rec.data.px) + 0.5,
-              bidSize: 1.0,
-              askSize: 1.0,
-              tradeSide: rec.data.side === 'B' ? 'BUY' : 'SELL',
-              tradeSize: parseFloat(rec.data.sz),
+          }
+        } else if (rec.type === 'trade' && rec.data) {
+          const rawSide = String(rec.data.side || '').toUpperCase();
+          if (rawSide === 'B' || rawSide === 'A') {
+            events.push({
+              kind: 'trade',
+              timestampMs: t,
+              side: rawSide as 'B' | 'A',
+              price: parseFloat(rec.data.px),
+              size: parseFloat(rec.data.sz),
+              tid: rec.data.tid ? Number(rec.data.tid) : undefined,
             });
           }
-        } catch {}
-      }
+        }
+      } catch {}
     }
 
-    // If ticks list is small or no file provided, synthesize 100 historical ticks around current orderbook
-    if (ticks.length < 10) {
-      const { bids, asks } = await fetchOrderBook(coin, 5);
-      const baseBid = bids[0]?.price || 75900;
-      const baseAsk = asks[0]?.price || 75901;
-      let mid = (baseBid + baseAsk) / 2;
-      let t = Date.now() - 100000;
-
-      for (let i = 0; i < 100; i++) {
-        const dPrice = (Math.random() - 0.49) * 2.0;
-        mid += dPrice;
-        t += 1000;
-        const bSz = 0.5 + Math.random() * 2.5;
-        const aSz = 0.5 + Math.random() * 2.5;
-        const side: 'BUY' | 'SELL' = Math.random() > 0.48 ? 'BUY' : 'SELL';
-        ticks.push({
-          timestampMs: t,
-          bidPrice: mid - 0.5,
-          askPrice: mid + 0.5,
-          bidSize: bSz,
-          askSize: aSz,
-          tradeSide: side,
-          tradeSize: 0.1 + Math.random() * 0.5,
-        });
-      }
+    if (events.length < 5) {
+      throw new Error(`Parsed only ${events.length} valid events from ${filePath}. At least 5 events required.`);
     }
 
-    const engine = new QuantitativeBacktestEngine(ticks);
-    const report = engine.runBacktest(coin);
-    spinner.succeed(`Backtest completed (${report.totalTicks} ticks, ${report.durationSeconds.toFixed(1)}s span)`);
+    const engine = new RobustBacktestEngine(events, 1.0, 0.5, 1);
+    const report = engine.evaluateAll(coin);
+    spinner.succeed(
+      `Backtest evaluated (${report.totalEventsProcessed} events: ${report.bookSnapshotsCount} books, ${report.tradesIngestedCount} trades over ${report.sessionDurationSec.toFixed(1)}s)`,
+    );
 
     console.log();
-    console.log(chalk.bold.cyan(`  🧪  Quantitative Strategy Backtest: ${coin}/USD (2026 Models)`));
-    console.log(chalk.gray(`  Frictions: 1.0 bps fee + 0.5 bps slippage per execution`));
+    console.log(chalk.bold.cyan(`  🧪  Quantitative Microstructure Backtest: ${coin}/USD (Turnover-Based Execution)`));
+    console.log(chalk.gray(`  Perimeter: 1.0 bps fee + 0.5 bps slippage per side (charged strictly on position transitions)`));
+    console.log(chalk.gray(`  Execution Delay: 1 event | Look-Ahead Bias: Strictly Zero`));
     console.log();
 
     const table = new Table({
       head: [
         chalk.bold.white('Strategy Model'),
-        chalk.bold.white('Net Return'),
-        chalk.bold.white('Sharpe (Ann)'),
-        chalk.bold.white('Max DD'),
-        chalk.bold.white('Win Rate'),
-        chalk.bold.white('Profit Factor'),
+        chalk.bold.white('Net PnL'),
+        chalk.bold.white('Gross PnL'),
+        chalk.bold.white('Costs'),
         chalk.bold.white('Trades'),
+        chalk.bold.white('Win Rate'),
+        chalk.bold.white('Profit Fac'),
+        chalk.bold.white('Max DD'),
+        chalk.bold.white('Sharpe (1s)'),
       ],
       style: { head: [], border: [] },
-      colAligns: ['left', 'right', 'right', 'right', 'right', 'right', 'right'],
+      colAligns: ['left', 'right', 'right', 'right', 'right', 'right', 'right', 'right', 'right'],
     });
 
     for (const s of report.strategies) {
-      const retColor = s.totalReturnPct >= 0 ? chalk.green : chalk.red;
-      const retStr = (s.totalReturnPct >= 0 ? '+' : '') + s.totalReturnPct.toFixed(3) + '%';
+      const netColor = s.totalNetReturnPct >= 0 ? chalk.green : chalk.red;
+      const netStr = (s.totalNetReturnPct >= 0 ? '+' : '') + s.totalNetReturnPct.toFixed(3) + '%';
+      const grossStr = (s.grossReturnPct >= 0 ? '+' : '') + s.grossReturnPct.toFixed(3) + '%';
+
       table.push([
-        chalk.bold(s.name),
-        retColor(retStr),
-        chalk.cyan(s.annualizedSharpe.toFixed(2)),
-        chalk.yellow(s.maxDrawdownPct.toFixed(2) + '%'),
-        s.winRatePct.toFixed(1) + '%',
+        chalk.bold(s.strategyName),
+        netColor(netStr),
+        grossStr,
+        s.totalFrictionCostPct.toFixed(3) + '%',
+        s.completedTradesCount.toString(),
+        s.tradeWinRatePct.toFixed(1) + '%',
         s.profitFactor.toFixed(2),
-        s.tradeCount.toString(),
+        s.maxDrawdownPct.toFixed(2) + '%',
+        s.timeNormalizedSharpe.toFixed(2),
       ]);
     }
 
     console.log(table.toString());
     console.log();
-    console.log(chalk.bold.green('  ✓ Outperformance Verdict:'));
-    console.log(chalk.gray('    FurlPay Hawkes-OFI Hybrid achieves optimal risk-adjusted alpha by filtering'));
-    console.log(chalk.gray('    false L2 book cancellations against high-frequency point-process trade clusters.'));
+    console.log(chalk.bold.yellow('  ⚠️  Methodological Notice:'));
+    console.log(chalk.gray('    Short session durations (< 30 min) provide indicative microstructure dynamics only.'));
+    console.log(chalk.gray('    Full statistical validation requires walk-forward out-of-sample datasets over multiple volatility regimes.'));
     console.log();
   } catch (err) {
     spinner.fail(`Failed to execute backtest for ${coin}`);
