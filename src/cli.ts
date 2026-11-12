@@ -28,12 +28,42 @@ import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
 import { Keypair } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
+import * as readline from "readline";
 
 export interface ParsedCliArgs {
   command: string;
   subcommand?: string;
   args: string[];
   flags: Record<string, any>;
+}
+
+/**
+ * Read a secret (key material or password) from stdin without ever echoing
+ * it into argv: `printf '%s\n%s\n' S... pw | furlpay wallet import` works in
+ * CI and on every shell. A piped line ends at the first newline; a TTY user
+ * is told the terminal echo stays on, so piping is recommended.
+ */
+async function readStdinSecret(): Promise<string | null> {
+  if (process.stdin.isTTY) {
+    console.log("(reading from the terminal — pipe the value in instead so it is not echoed)");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const line = await new Promise<string>((resolve) => rl.question("", resolve));
+      return line.trim() || null;
+    } finally {
+      rl.close();
+    }
+  }
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  try {
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (trimmed) return trimmed;
+    }
+    return null;
+  } finally {
+    rl.close();
+  }
 }
 
 export class FurlPayStellarCli {
@@ -204,10 +234,29 @@ export class FurlPayStellarCli {
     }
 
     if (sub === "import") {
-      const name = flags.name || "default";
-      const sampleKey = Keypair.random().secret();
-      this.keystore.importSecretKey(name, sampleKey, "default-password");
-      console.log(`[+] Account '${name}' imported securely into local encrypted keystore.`);
+      // The caller's key is what gets imported — never a generated stand-in.
+      // The secret is read from --secret-key or stdin (so it can be piped
+      // without landing in shell history), and the encryption password must
+      // be supplied: a hardcoded default would make the keystore decryptable
+      // by anyone with read access to the file.
+      const name = flags.name || args[0] || "default";
+      const secretKey = flags["secret-key"] || (await readStdinSecret()) || "";
+      const password = flags.password || (await readStdinSecret()) || "";      if (!secretKey || !password) {
+        console.log("Usage: furlpay wallet import --name <name> [--password <pw>]");
+        console.log("  The secret key and (if not passed) the password are read from stdin:");
+        console.log("    printf '%s\\n%s\\n' S... my-password | furlpay wallet import --name mykey");
+        return;
+      }
+      let entry;
+      try {
+        entry = this.keystore.importSecretKey(name, secretKey, password);
+      } catch (e) {
+        console.error(`[!] Import failed: ${(e as Error).message}`);
+        return;
+      }
+      console.log(`[+] Account '${name}' imported into the encrypted keystore.`);
+      console.log(`    - Public key: ${entry.publicKey}`);
+      console.log("    The secret key itself is never displayed or logged.");
       return;
     }
 
@@ -221,6 +270,7 @@ export class FurlPayStellarCli {
     }
 
     console.log("Usage: furlpay wallet <connect ledger|connect walletconnect|connect extension|agent-keygen|import|list>");
+    console.log("  import: the secret key and password come from --secret-key/--password or stdin lines (never echoed, never logged).");
   }
 
   private async handleTrade(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
@@ -291,8 +341,8 @@ export class FurlPayStellarCli {
         sponsor,
       });
 
-      console.log(`[+] Broadcast to Stellar Core Consensus...`);
-      console.log(`[✓] Trade executed! Ledger #${result.ledgerNumber} | Tx Hash: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-5)}`);
+      console.log(`[!] SIMULATED — no transaction was built, signed or broadcast to Stellar.`);
+      console.log(`[i] Simulated fill: Ledger #${result.ledgerNumber} | sim hash: ${result.txHash.slice(0, 14)}…`);
       console.log(`    - Filled:          ${result.filledAmount} ${asset.split(":")[0]} @ ${result.price} ${against.split(":")[0]}`);
       console.log(`    - Total Value:     ${result.totalCost} ${against.split(":")[0]}`);
       console.log(`    - Transaction Fee: ${result.feePaidUsd}`);
@@ -314,7 +364,8 @@ export class FurlPayStellarCli {
         sponsor,
       });
 
-      console.log(`[✓] Path Payment Settlement Complete! Ledger #${result.ledgerNumber}`);
+      console.log(`[!] SIMULATED — no path-payment transaction was broadcast.`);
+      console.log(`[i] Simulated settlement: Ledger #${result.ledgerNumber} | sim hash: ${result.txHash.slice(0, 14)}…`);
       console.log(`    - Spent:     ${result.spentAmount} ${result.sourceAsset.split(":")[0]}`);
       console.log(`    - Received:  ${result.receivedAmount} ${result.targetAsset.split(":")[0]}`);
       console.log(`    - Multi-Hop: ${result.hopsCount} route segments resolved with zero MEV`);
@@ -338,7 +389,8 @@ export class FurlPayStellarCli {
         sponsor: flags.sponsor !== false,
       });
 
-      console.log(`[✓] Soroban AMM Swap Executed! Ledger #${result.ledgerNumber}`);
+      console.log(`[!] SIMULATED — no Soroban contract call was submitted on-chain.`);
+      console.log(`[i] Simulated swap: Ledger #${result.ledgerNumber} | sim hash: ${result.txHash.slice(0, 14)}…`);
       console.log(`    - Pool:     ${result.poolId}`);
       console.log(`    - Swapped:  ${result.soldAmount} ${result.soldAsset} → ${result.receivedAmount} ${result.targetAsset}`);
       console.log(`    - CPU Gas:  ${result.simulation.cpuInstructions.toLocaleString()} instructions simulated`);
@@ -689,14 +741,16 @@ export class FurlPayStellarCli {
     if (sub === "cancel") {
       const offerId = flags["offer-id"] || args[0] || "8829104";
       const res = await this.orders.cancelOrder(signer, offerId, flags.sponsor !== false);
-      console.log(`[✓] Order #${res.offerId} canceled successfully. (Tx: ${res.txHash.slice(0, 10)}...)`);
+      console.log(`[!] SIMULATED — no Manage Offer cancellation was broadcast to Stellar.`);
+      console.log(`[i] Order #${res.offerId} marked canceled locally. (sim hash: ${res.txHash.slice(0, 14)}…)`);
       return;
     }
 
     if (sub === "cancel-all") {
       const pair = flags.pair;
       const res = await this.orders.cancelAllOrders(signer, pair);
-      console.log(`[✓] Successfully canceled ${res.canceledCount} resting order(s).`);
+      console.log(`[!] SIMULATED — no cancellations were broadcast to Stellar.`);
+      console.log(`[i] ${res.canceledCount} resting order(s) marked canceled locally.`);
       return;
     }
 

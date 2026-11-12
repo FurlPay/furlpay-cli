@@ -128,9 +128,9 @@ export interface X402Challenge {
 }
 
 export interface X402PaymentResult {
-  status: "SETTLED" | "REJECTED" | "HELD";
+  status: "SETTLED" | "REJECTED" | "HELD" | "SIMULATED";
   txId: string;
-  settlementType: "TIGERBEETLE_NETTING" | "STELLAR_ONCHAIN";
+  settlementType: "TIGERBEETLE_NETTING" | "STELLAR_ONCHAIN" | "LOCAL_SIMULATION";
   amount: string;
   recipient: string;
   fee: string;

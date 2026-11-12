@@ -102,6 +102,12 @@ ${c.bold("x402 Micropayments & Agentic MCP")}
   x402 pay --challenge-header <hdr>              HTTP 402 challenge resolution (<$0.0001 fee)
   mcp [--wallet agent-alpha]                     Run stdio Model Context Protocol tool server
 
+${c.bold("Account & Authentication")}
+  login [--device]                               Sign in: browser device authorization (--device, RFC 8628)
+                                                 or email OTP. Session stays scoped to account:read.
+  logout                                         Clear the stored session for the current env
+  whoami                                         Show the authenticated account
+
 ${c.bold("Cross-Chain Payments & Banking")}
   balance [--chain arbitrum]                     All token balances + total
   send <amount> <to> [--token USDC]              Gas-sponsored transfer (--mfa for ≥$5k)
@@ -157,7 +163,11 @@ async function main() {
     }
 
     // ---- auth & config ----------------------------------------------------
-    case "login": return commands.login(args, flags);
+    case "login":
+      // `--device` uses the RFC 8628 browser authorization flow against the
+      // web app (/device-auth); the default stays the email-OTP cookie flow.
+      if (flags.device) return require("../lib/deviceAuth").deviceLogin(flags);
+      return commands.login(args, flags);
     case "logout": return commands.logout(args, flags);
     case "whoami": return commands.whoami(args, flags);
     case "config": {

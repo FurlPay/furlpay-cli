@@ -62,8 +62,12 @@ export class X402Engine {
       }
     }
 
-    // TigerBeetle micro-netting execution (<$0.0001 cost, sub-millisecond finality)
-    const txId = `furlpay_net_${crypto.randomBytes(8).toString("hex")}`;
+    // SIMULATION ONLY — this engine has no TigerBeetle connection and no
+    // network path; the txId is locally generated and nothing settled. The
+    // simnet prefix, SIMULATED status and simulated flag make that
+    // impossible to misread, and the payload is NOT a valid x402
+    // Authorization header (no signature, no facilitator).
+    const txId = `furlpay_simnet_${crypto.randomBytes(8).toString("hex")}`;
     const tokenPayload = Buffer.from(
       JSON.stringify({
         txId,
@@ -71,15 +75,16 @@ export class X402Engine {
         amount: challenge.amount,
         nonce: challenge.nonce,
         settledAt: Date.now(),
+        simulated: true,
       })
     ).toString("base64");
 
     const authHeader = `Authorization: x402 ${tokenPayload}`;
 
     return {
-      status: "SETTLED",
+      status: "SIMULATED",
       txId,
-      settlementType: "TIGERBEETLE_NETTING",
+      settlementType: "LOCAL_SIMULATION",
       amount: challenge.amount,
       recipient: challenge.recipient,
       fee: "$0.0000001",

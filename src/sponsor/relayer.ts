@@ -36,6 +36,8 @@ export class SponsorshipRelayer {
     sponsorPubkey: string;
     maxFeeStroops: number;
     sponsoredCostUsd: number;
+    /** True when the fee-bump envelope could not be built — nothing was sponsored or broadcast. */
+    simulated?: boolean;
   }> {
     console.log(`[i] Requesting Fee-Bump Sponsorship from FurlPay Relayer...`);
 
@@ -61,13 +63,17 @@ export class SponsorshipRelayer {
         sponsoredCostUsd,
       };
     } catch {
-      // Fallback for simulation / mock envelopes
-      console.log(`[+] Sponsorship granted: Inclusion fee paid by FurlPay Vault.`);
+      // Failing to build the fee-bump envelope must NOT look like a granted
+      // sponsorship: callers use this result to announce a transaction the
+      // network never saw. Return an explicitly simulated envelope and say so
+      // on every output channel a caller might render.
+      console.log(`[!] SIMULATED — sponsorship NOT granted and no transaction was broadcast.`);
       return {
         feeBumpXdr: innerTxXdr,
         sponsorPubkey: this.sponsorKeypair.publicKey(),
         maxFeeStroops,
         sponsoredCostUsd,
+        simulated: true,
       };
     }
   }

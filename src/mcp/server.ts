@@ -388,8 +388,12 @@ export class McpStdioServer {
             tx_hash: res.txHash,
           };
         } else {
+          // SIMULATED — no FOBXX/BENJI contract call exists in this build;
+          // the shares/APY below are sample data, not a deposit record.
           return {
-            status: "SUCCESS",
+            simulated: true,
+            notice: "SIMULATED — no Stellar deposit was broadcast and no FOBXX contract call was made.",
+            status: "SIMULATED",
             vault: "STELLAR_FOBXX_BENJI",
             shares_minted: amt.toFixed(2),
             asset: "FOBXX",
@@ -401,17 +405,27 @@ export class McpStdioServer {
       }
 
       case "furlpay_trade": {
-        const dummyKeypair = Keypair.random();
-        const signer = new KeypairSigner(dummyKeypair);
-        const tradeRes = await this.sdexService.executeLimitOrder(signer, {
-          side: args.side,
-          asset: args.asset.includes(":") ? args.asset : `${args.asset}:GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ`,
-          against: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-          amount: args.amount,
-          price: args.price,
-          sponsor: args.sponsor ?? true,
-        });
-        return tradeRes;
+        // An MCP agent must never trade through a signer it invented.
+        // Keypair.random() produced "successful" trades signed by an
+        // ephemeral key that controls no funds; refuse instead.
+        if (args.simulate === true) {
+          const signer = new KeypairSigner(Keypair.random());
+          const tradeRes = await this.sdexService.executeLimitOrder(signer, {
+            side: args.side,
+            asset: args.asset.includes(":") ? args.asset : `${args.asset}:GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ`,
+            against: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+            amount: args.amount,
+            price: args.price,
+            sponsor: args.sponsor ?? true,
+          });
+          return { ...tradeRes, simulated: true, notice: "SIMULATED — no transaction was broadcast; requires an explicit simulate=true." };
+        }
+        return {
+          status: "REJECTED",
+          error: "no_signer_configured",
+          message:
+            "No Stellar signer is configured in MCP server mode. To place a real SDEX order, run `furlpay wallet import` in the CLI (never pass key material through MCP tool arguments), or call this tool with simulate=true for an explicitly simulated result.",
+        };
       }
 
       case "furlpay_trade_perp":
@@ -431,7 +445,12 @@ export class McpStdioServer {
       }
 
       case "furlpay_balance": {
+        // SIMULATED fixture balances — this MCP mode has no authenticated
+        // account connection, so any "balance" here is sample data. The flag
+        // makes it impossible for an agent to mistake it for a real reading.
         return {
+          simulated: true,
+          notice: "SIMULATED sample balances — connect an authenticated account (furlpay login) for real balances.",
           account: policy?.publicKey || "GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ",
           balances: [
             { asset: "USDC", chain: "Hyperliquid", balance: "14850.20", valueUsd: "14850.20" },

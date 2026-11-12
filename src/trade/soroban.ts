@@ -18,6 +18,8 @@ export interface SorobanSimulationMetrics {
 
 export interface SorobanSwapResult {
   txHash: string;
+  /** True: this hash is `sim_…` and no transaction reached the network. */
+  simulated: boolean;
   ledgerNumber: number;
   poolId: string;
   soldAmount: string;
@@ -73,11 +75,13 @@ export class SorobanTradingService {
       sponsored = true;
     }
 
-    const txHash = crypto.randomBytes(32).toString("hex");
+    // SIMULATION ONLY — no contract call is submitted; sim_ marks the hash as fake.
+    const txHash = `sim_${crypto.randomBytes(32).toString("hex")}`;
     const ledgerNumber = 54891220 + Math.floor(Date.now() / 5000) % 10000;
 
     return {
       txHash,
+      simulated: true,
       ledgerNumber,
       poolId: params.poolId,
       soldAmount: params.sellAmount,

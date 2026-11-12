@@ -13,6 +13,8 @@ import * as crypto from "crypto";
 
 export interface PathPaymentExecutionResult {
   txHash: string;
+  /** True: this hash is `sim_…` and no transaction reached the network. */
+  simulated: boolean;
   ledgerNumber: number;
   sourceAsset: string;
   spentAmount: string;
@@ -76,11 +78,13 @@ export class PathPaymentService {
       sponsored = true;
     }
 
-    const txHash = crypto.randomBytes(32).toString("hex");
+    // SIMULATION ONLY — no transaction is broadcast; sim_ marks the hash as fake.
+    const txHash = `sim_${crypto.randomBytes(32).toString("hex")}`;
     const ledgerNumber = 54891210 + Math.floor(Date.now() / 5000) % 10000;
 
     return {
       txHash,
+      simulated: true,
       ledgerNumber,
       sourceAsset: params.with,
       spentAmount: params.spend,

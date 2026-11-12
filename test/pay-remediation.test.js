@@ -100,27 +100,27 @@ async function runRemediationTests() {
     assert.strictEqual(profile.kybStatus, "unverified", "Live account without verified record must remain unverified");
   });
 
-  // SEC-09: Cryptographic Quote Verification
-  await test("SEC-09: fetchPayQuote generates HMAC-SHA256 authenticated quoteId tokens", async () => {
+  // SEC-09 (revised 2026-11-12): an offline fallback quote must NOT forge a
+  // server-signed id. The previous design HMAC'd quoteIds with a hardcoded
+  // secret shipped in the client — anyone could produce ids that looked
+  // server-authenticated. The fallback quote is now an explicitly LOCAL
+  // estimate (quo_local_, no signature, local:true) and the server rejects
+  // non-authoritative ids at execute time.
+  await test("SEC-09: fallback quotes are honestly local, never forge server-signed quoteIds", async () => {
     const quote = await fetchPayQuote("@recipient", 100.0, "USD", {});
-    assert(quote.quoteId.startsWith("quo_furl_"), "Quote must start with quo_furl_");
+    assert(quote.quoteId.startsWith("quo_local_"), "Fallback quote must carry the quo_local_ prefix, not a server-shaped quo_furl_ id");
+    assert.strictEqual(quote.local, true, "Fallback quote must be flagged local:true");
 
     const parts = quote.quoteId.split("_");
-    assert.strictEqual(parts.length, 4, "Quote token must have 4 segments: quo_furl_<expiresAt>_<signature>");
+    assert.strictEqual(parts.length, 4, "Local quote token must have 4 segments: quo_local_<expiresAt>_<random>");
     const expiresAt = Number(parts[2]);
-    const sig = parts[3];
     assert(!isNaN(expiresAt), "Segment 2 must be numeric timestamp");
     assert(expiresAt > Date.now(), "Quote must have future expiration");
-    assert.strictEqual(sig.length, 16, "Signature must be 16-hex characters");
 
-    // Verify HMAC calculation
-    const quoteSecret = "furlpay_quote_secret_2026_sign";
-    const expectedSig = crypto
-      .createHmac("sha256", quoteSecret)
-      .update(`@recipient:100:USD:${expiresAt}`)
-      .digest("hex")
-      .slice(0, 16);
-    assert.strictEqual(sig, expectedSig, "HMAC-SHA256 signature must verify correctly against payload parameters");
+    // No signature segment claim: the id must NOT be verifiable against any
+    // shipped secret, because none exists in the client.
+    assert(!/^[0-9a-f]{16}$/.test(parts[3]) || parts[3].length === 16, "Segment 3 is an opaque random suffix");
+    assert(!("signature" in quote), "A local quote carries no signature field");
   });
 
   // SEC-11: PowerShell Argument Splatting Protection

@@ -237,9 +237,13 @@ test("FurlPay Stellar: HTTP 402 Micropayment Engine & TigerBeetle Netting", asyn
   assert.strictEqual(challenge.amount, "0.0005");
   assert.strictEqual(challenge.nonce, "abcd1234");
 
+  // SIMULATION-ONLY semantics (2026-11-12 audit): the engine has no
+  // TigerBeetle connection, so the result must SAY simulated — a canned
+  // SETTLED here previously fabricated a settlement record.
   const settled = await x402.settleChallenge(challenge);
-  assert.strictEqual(settled.status, "SETTLED");
-  assert.strictEqual(settled.settlementType, "TIGERBEETLE_NETTING");
+  assert.strictEqual(settled.status, "SIMULATED");
+  assert.strictEqual(settled.settlementType, "LOCAL_SIMULATION");
+  assert.match(settled.txId, /^furlpay_simnet_/);
   assert.ok(settled.authorizationHeader.startsWith("Authorization: x402"));
 });
 
@@ -260,12 +264,13 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
   const invoiceRes = await mcp.handleCall("furlpay_settle_invoice", {
     challengeHeader: 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"',
   });
-  assert.strictEqual(invoiceRes.status, "SETTLED");
-  assert.strictEqual(invoiceRes.settlement_type, "TIGERBEETLE_NETTING");
+  assert.strictEqual(invoiceRes.status, "SIMULATED", "settlement is local simulation only");
+  assert.strictEqual(invoiceRes.settlement_type, "LOCAL_SIMULATION");
 
   // Call furlpay_sweep_treasury with FOBXX (Stellar Benji regulated yield)
   const fobxxSweep = await mcp.handleCall("furlpay_sweep_treasury", { amountUsd: 1000.0, target: "FOBXX" });
-  assert.strictEqual(fobxxSweep.status, "SUCCESS");
+  assert.strictEqual(fobxxSweep.status, "SIMULATED", "FOBXX sweep has no live contract call — must be labeled simulated");
+  assert.strictEqual(fobxxSweep.simulated, true);
   assert.strictEqual(fobxxSweep.vault, "STELLAR_FOBXX_BENJI");
   assert.ok(fobxxSweep.apy.includes("SEC Regulated Yield"));
 

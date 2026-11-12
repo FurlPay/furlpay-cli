@@ -60,7 +60,11 @@ async function runTests() {
 
   await test("fetchPayQuote produces valid quote with zero transaction fees", async () => {
     const quote = await fetchPayQuote("@recipient", 10.0, "USD", {});
-    assert(quote.quoteId.startsWith("quo_furl_"), "quoteId must have correct prefix");
+    // The offline fallback quote is a LOCAL estimate and says so: the
+    // quo_local_ prefix (no HMAC pretense) is the honest shape — a
+    // quo_furl_-prefixed id here would have forged a server-signed look.
+    assert(quote.quoteId.startsWith("quo_local_"), "local fallback quoteId must carry the honest quo_local_ prefix");
+    assert.strictEqual(quote.local, true, "fallback quote is explicitly marked local");
     assert.strictEqual(quote.amount.decimal, 10.0);
     assert.strictEqual(quote.amount.fee, 0.0, "Internal A2A transfers must be free ($0.00)");
     assert.strictEqual(quote.settlement.rail, "FurlPay Ledger");

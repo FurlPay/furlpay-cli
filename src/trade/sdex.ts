@@ -11,6 +11,8 @@ import * as crypto from "crypto";
 
 export interface SdexExecutionResult {
   txHash: string;
+  /** True: this hash is `sim_…` and no transaction reached the network. */
+  simulated: boolean;
   ledgerNumber: number;
   status: "FILLED" | "RESTING" | "PARTIAL";
   filledAmount: string;
@@ -93,12 +95,15 @@ export class SdexTradingService {
       });
     }
 
-    // Generate mock deterministic tx hash & ledger number
-    const txHash = crypto.randomBytes(32).toString("hex");
+    // SIMULATION ONLY — no Stellar transaction is built, signed or submitted.
+    // The hash is marked sim_ so it can never be mistaken for a real network
+    // hash, and callers must surface the simulated flag.
+    const txHash = `sim_${crypto.randomBytes(32).toString("hex")}`;
     const ledgerNumber = 54891200 + Math.floor(Date.now() / 5000) % 10000;
 
     return {
       txHash,
+      simulated: true,
       ledgerNumber,
       status: "FILLED",
       filledAmount: params.amount,

@@ -57,7 +57,7 @@ export class OrderManager {
     signer: SignerInterface,
     offerId: string,
     sponsor?: boolean
-  ): Promise<{ txHash: string; offerId: string; status: "CANCELED"; sponsored: boolean }> {
+  ): Promise<{ txHash: string; simulated: boolean; offerId: string; status: "CANCELED"; sponsored: boolean }> {
     const order = this.mockOrders.get(offerId);
     if (!order) {
       throw new Error(`Order #${offerId} not found or already filled/canceled.`);
@@ -68,10 +68,12 @@ export class OrderManager {
     }
 
     this.mockOrders.delete(offerId);
-    const txHash = crypto.randomBytes(32).toString("hex");
+    // SIMULATION ONLY — no Manage Offer operation is submitted to Horizon.
+    const txHash = `sim_${crypto.randomBytes(32).toString("hex")}`;
 
     return {
       txHash,
+      simulated: true,
       offerId,
       status: "CANCELED",
       sponsored: Boolean(sponsor),
@@ -81,15 +83,17 @@ export class OrderManager {
   async cancelAllOrders(
     signer: SignerInterface,
     pair?: string
-  ): Promise<{ canceledCount: number; txHash: string }> {
+  ): Promise<{ canceledCount: number; txHash: string; simulated: boolean }> {
     const orders = await this.listOrders(await signer.getPublicKey(), pair);
     for (const ord of orders) {
       this.mockOrders.delete(ord.id);
     }
-    const txHash = crypto.randomBytes(32).toString("hex");
+    // SIMULATION ONLY — no transactions are submitted to Horizon.
+    const txHash = `sim_${crypto.randomBytes(32).toString("hex")}`;
     return {
       canceledCount: orders.length,
       txHash,
+      simulated: true,
     };
   }
 }

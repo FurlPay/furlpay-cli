@@ -9,6 +9,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { Keypair } from "@stellar/stellar-sdk";
 import { getConfigDir } from "../config";
+import { keypairFromMnemonic } from "./mnemonic";
 
 export interface StoredKeyEntry {
   name: string;
@@ -99,9 +100,11 @@ export class KeystoreService {
     return entry;
   }
 
-  importMnemonic(name: string, mnemonic: string, password: string): StoredKeyEntry {
-    // Generate keypair for verification
-    const kp = Keypair.random();
+  importMnemonic(name: string, mnemonic: string, password: string, passphrase = ""): StoredKeyEntry {
+    // Derive the keypair FROM the mnemonic (SLIP-0010, m/44'/148'/0') so the
+    // displayed public key is the one the user's backup controls. Validation
+    // inside keypairFromMnemonic fails closed on a checksum mismatch.
+    const kp = keypairFromMnemonic(mnemonic, passphrase);
     const entries = this.loadEntries();
     const entry: StoredKeyEntry = {
       name,
