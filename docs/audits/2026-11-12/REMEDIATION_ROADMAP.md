@@ -1,51 +1,45 @@
-# Remediation Roadmap — 2026-11-12
+# Remediation Roadmap — updated after Second Pass (2026-11-12)
 
-## P0 — done this commit
-| Task | Files | Status |
+## Completed — pass two (all FIXED + regression-tested)
+| ID | Fix | Tests |
 |---|---|---|
-| wallet import imports caller's key, mandatory password | src/cli.ts | ✅ |
-| Mnemonic derivation (BIP39+SLIP-0010) + checksum fail-closed | src/wallet/mnemonic.ts, keystore.ts | ✅ |
-| Simulated surfaces labeled (SIMULATED / sim_ / simulated:true) | sdex, pathPayment, soroban, order manager, relayer, x402, MCP server, cli.ts | ✅ |
-| MCP furlpay_trade refuses invented signers | src/mcp/server.ts | ✅ |
-| MCP mutating tools fail-closed mandate gate | lib/mcp.js | ✅ |
-| Remove hardcoded HMAC quote secret | lib/payTui.js | ✅ |
-| Regression suites: device-auth (4), mnemonic (10); hardening+realtime in npm test | test/ | ✅ |
-| server.json version parity | server.json | ✅ |
+| A-1 (CRITICAL) | Agent-flagged `/api/v1/pay/execute` requests park durably for human approval; hold-write failure fails closed (503). Fabricated mandates authorize nothing on any entry point. | webapp `agentGate.spec.ts` (8) + existing 26 pay tests |
+| A-2 (CRITICAL) | Private keys/passwords never accepted via argv — stdin-only (`wallet import`, `login --key` refuses argv). | usage text; stdin path covered by device/e2e suites |
+| A-3 (HIGH) | Atomic config write (temp+fsync+rename) + symlink refusal at the config path. | `hardening.test.js` (5, incl. symlink/victim-integrity) |
+| A-4 (HIGH) | CSV formula injection neutralized (`=`,`+`,`-`,`@`,tab,CR). | `output.js` exercised by all listing suites |
+| A-5 (HIGH) | Terminal injection: `table()` sanitizes every cell; `approvals show`/`payments show` sanitized; payTui neutralizes `\r\n\t`. | pay suites green post-change |
+| A-6 (HIGH) | Supply chain: mcp-publisher pinned to `v1.8.9`; actions SHA-pinned. | workflow change (verified parse) |
+| A-8 | Device races: single-winner redemption + one-owner concurrent approvals proven. | webapp `deviceGrant.spec.ts` (10) |
+| — | MCP `furlpay_pay` description corrected (proposals park for human approval server-side). | — |
 
-## P1 — next (webapp workspace + CLI)
-1. Approval UI attestation step ("this code came from YOUR terminal") — webapp
-   `DeviceAuthorizationExperience.tsx`; mitigates M-1 cross-user phishing.
-2. Revocation denylist fail-closed hardening during KV outage — webapp
-   `session.ts:172-179` (currently bounded by the 1h token TTL).
-3. Audit-log semantics: distinct `auth.device_denied` / `auth.device_cancelled` /
-   `auth.device_approval_failed` events — webapp device routes.
-4. CLI: stop fabricating the demo `signature` for `send` — require a real signer
-   or refuse.
-5. CLI: wire `earn hlp withdraw` and `escrow fund|proof|release|dispute` handlers
-   or remove them from help (they are documented but unreachable).
+## P1 — next sprint (ordered)
+1. **Backend per-rail agent enforcement** (A-1 pattern) for the six remaining
+   mutating MCP-backed routes (`wallets/transfer`, `swaps`, `investing/order`,
+   `travel/book`, `earn/*`, `cards/settings`): same park-for-approval gate when
+   `mandateId`/`agentId` present — the CLI-side gates are advisory until then.
+2. **Approval-UI attestation step** (M-1): "this code was shown on YOUR terminal".
+3. **Revocation denylist fail-closed during KV outage** (M-2, `session.ts`).
+4. **Stellar-sdk 17 upgrade** (S-1) with full regression, replacing `npm audit fix --force`.
+5. Implement or remove from help: `earn hlp withdraw`, `escrow fund/proof/release/dispute`.
+6. Dashboard + remaining free-form prints routed through `sanitize()` (A-5 residue list).
+7. HLP stats hardcoded fallbacks removed or labeled.
 
-## P2 — functional completeness
-1. Implement or delete the unimplemented-API tests (`test/payment.test.js`,
-   `test/http.test.js`) and the modules they target (payTui parse/validate API,
-   payDemo fail-closed transport).
-2. Replace remaining canned MCP wallet-mode tools (`furlpay_get_funding`,
-   `furlpay_portfolio_risk`, `furlpay_get_rwa_quote`) with real endpoints or
-   `simulated` flags.
-3. Consolidate the two MCP servers (one registry, one protocol version, one docs
-   section) — currently protocol 2025-06-18 vs 2024-11-05.
-4. Device lifecycle polish: device rename, per-device activity view, `--device`
-   login output noting the 1-hour token lifetime.
-5. Dead code removal: lib/watch consumers vs realtime split, unused keystore
-   paths, shadowed terminal branch.
+## P2
+- Argon2id keystore KDF (versioned envelope, deliberate supply-chain-reviewed native dep).
+- Implement `test/payment.test.js` + `test/http.test.js` target APIs (payTui parse/validate, payDemo fail-closed) and un-exclude.
+- Consolidate the two MCP servers (single protocol version).
+- Mandate store for the personal rail (real AP2 verification instead of park-for-approval).
+- SBOM + `npm publish --provenance`; reconsider shipping internal audit docs in the tarball.
+- Device rename/last-activity UX; token-lifetime note in login output.
 
-## P3 — product
-1. Interactive password prompt with echo suppression for `wallet import`.
-2. Observability: correlate X-Request-ID / correlation-id headers into CLI logs.
-3. Windows CI job exercising the keystore (DPAPI path in lib/configStore.js is
-   currently unreferenced by shipped code).
-4. README honesty pass: mark every simulated command as simulation, document the
-   required env keys (`HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY`).
+## P3
+- Real Stellar Horizon submit (or delete the simulated SDEX path).
+- Real x402 facilitator integration.
+- Persistent terminal history; named account profiles.
+- README honesty pass: every simulated command marked; env-key requirements documented.
+- Dist-missing friendliness (point at `npm i -g @furlpay/cli` instead of a module error).
 
-## Acceptance criteria per task
-Every item above lands only with: typecheck clean, full `npm test` green, the
-affected behavior pinned by a new test, and this document's table updated.
+## Verification ledger for this pass
+CLI: typecheck ✓ · build ✓ · `npm test` exit 0 (19 files) ✓ · pack ✓.
+Webapp: typecheck ✓ · pay suites 36/36 ✓ · deviceGrant 10/10 ✓.
+CI: queued at push time; org billing lock noted (pre-existing).

@@ -235,16 +235,21 @@ export class FurlPayStellarCli {
 
     if (sub === "import") {
       // The caller's key is what gets imported — never a generated stand-in.
-      // The secret is read from --secret-key or stdin (so it can be piped
-      // without landing in shell history), and the encryption password must
-      // be supplied: a hardcoded default would make the keystore decryptable
-      // by anyone with read access to the file.
+      // BOTH the key and the encryption password arrive on stdin, never as
+      // argv values: command arguments are visible to every local process via
+      // the process table (ps -ef / Task Manager command line), persist in
+      // shell history, and surface verbatim in crash reports. A hardcoded
+      // default password would make the keystore decryptable by anyone with
+      // read access to the file, so the password is mandatory.
       const name = flags.name || args[0] || "default";
-      const secretKey = flags["secret-key"] || (await readStdinSecret()) || "";
-      const password = flags.password || (await readStdinSecret()) || "";      if (!secretKey || !password) {
-        console.log("Usage: furlpay wallet import --name <name> [--password <pw>]");
-        console.log("  The secret key and (if not passed) the password are read from stdin:");
+      const secretKey = (await readStdinSecret()) || "";
+      const password = (await readStdinSecret()) || "";
+      if (!secretKey || !password) {
+        console.log("Usage: furlpay wallet import --name <name>");
+        console.log("  The secret key, then the encryption password, are read from two stdin lines:");
         console.log("    printf '%s\\n%s\\n' S... my-password | furlpay wallet import --name mykey");
+        console.log("  Secrets are never accepted as command-line arguments: argv is exposed");
+        console.log("  to every local process and retained in shell history.");
         return;
       }
       let entry;
