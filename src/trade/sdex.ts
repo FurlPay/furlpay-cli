@@ -20,7 +20,15 @@ export interface SdexExecutionResult {
   totalCost: string;
   feePaidUsd: string;
   sponsored: boolean;
+  /**
+   * Honest SEP-8 status. `true` only means "no issuer authorization was
+   * required" (unregulated asset). For regulated assets this is always
+   * false in this build — no approval server is contacted, so no
+   * compliance claim can be made. See sep8Status/sep8Note.
+   */
   sep8Compliant: boolean;
+  sep8Status: "not_required" | "not_performed";
+  sep8Note?: string;
 }
 
 export class SdexTradingService {
@@ -66,15 +74,18 @@ export class SdexTradingService {
     const amountNum = parseFloat(params.amount);
     const totalCostUsd = (priceNum * amountNum).toFixed(4);
 
-    // 1. Check SEP-8 Regulated Asset Status
+    // 1. SEP-8 status — recorded honestly, never claimed. This whole method
+    // is a SIMULATION (see below); a regulated-asset simulation still runs,
+    // but its result must say issuer authorization was NOT performed.
     const isRegulated = this.sep8Engine.isRegulatedAsset(params.asset);
     let sep8Passed = false;
+    let sep8Status: "not_required" | "not_performed" = "not_required";
+    let sep8Note: string | undefined;
     if (isRegulated) {
       const sep8Res = await this.sep8Engine.submitForApproval(params.asset, "UNRESTRICTED_XDR_PAYLOAD", pubkey);
-      if (!sep8Res.approved) {
-        throw new Error(`SEP-8 compliance rejected: ${sep8Res.message} (Action URL: ${sep8Res.actionUrl})`);
-      }
-      sep8Passed = true;
+      sep8Passed = sep8Res.approved; // false in this build — no approval server exists
+      sep8Status = "not_performed";
+      sep8Note = sep8Res.message;
     }
 
     // 2. Fee-Bump Sponsorship
@@ -112,6 +123,8 @@ export class SdexTradingService {
       feePaidUsd: sponsored ? "0.0000000 (Sponsored)" : "0.0000120",
       sponsored,
       sep8Compliant: sep8Passed,
+      sep8Status,
+      ...(sep8Note ? { sep8Note } : {}),
     };
   }
 }

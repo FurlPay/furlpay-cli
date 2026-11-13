@@ -3,13 +3,13 @@
 FurlPay CLI — Stellar Tokenized Equities & RWAs, SDEX/Soroban Trading, x402 Micropayments & MCP Server.
 
 [![npm](https://img.shields.io/npm/v/%40furlpay%2Fcli?logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@furlpay/cli)
-[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ES2022-3178C6?logo=typescript&logoColor=white)](src/index.ts)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol_26-black?logo=stellar&logoColor=white)](https://stellar.org)
 [![MCP](https://img.shields.io/badge/MCP-server_mode-6E56CF?logo=anthropic&logoColor=white)](#model-context-protocol-mcp-ai-agents)
 [![License](https://img.shields.io/badge/license-MIT-blue)](../../LICENSE)
 
-High-performance terminal execution layer written in TypeScript for connecting Stellar hardware wallets, executing limit orders on the **Stellar Decentralized Exchange (SDEX)**, routing cross-asset liquidity through **Soroban AMMs**, verifying **SEP-8 compliance** on regulated tokenized equities (JQQQ, Securitize NVDA) and money market funds (FOBXX, USTBL), settling **x402 micropayments**, and running autonomous **Model Context Protocol (MCP)** agent trading runtimes.
+High-performance terminal execution layer written in TypeScript for connecting Stellar hardware wallets, SDEX/Soroban **trade tooling** (Hyperliquid perp execution is live and signed; Stellar SDEX/Soroban execution is a clearly-labeled local simulation in this build — see the [honesty matrix](#what-is-live-vs-simulated-honesty-matrix)), surfacing **SEP-8 issuer-authorization requirements** for regulated tokenized equities (JQQQ, Securitize NVDA) and money market funds (FOBXX, USTBL) without ever faking an approval, resolving **x402 micropayment challenges** (simulated settlement), and running autonomous **Model Context Protocol (MCP)** agent trading runtimes.
 
 ```bash
 npm install -g @furlpay/cli
@@ -109,7 +109,7 @@ graph TD
     subgraph CoreEngine["FurlPay CLI Core (TypeScript Engine)"]
         WalletLayer["Wallet Connector Layer (Ledger, SEP-7, Loopback, Keystore, AgentKey)"]
         SOR["Smart Order Router (SDEX CLOB + Soroban AMM + Path Payments)"]
-        Compliance["SEP-8 and Compliance Engine (KYC Whitelist and Co-Signer)"]
+        Compliance["SEP-8 Metadata Engine (honest refusal — no approval server in this build)"]
         AgentTrust["Agent Trust Engine (OFAC/SDN, Velocity and Spend Limits)"]
     end
 
@@ -119,7 +119,7 @@ graph TD
     end
 
     subgraph SettlementLayer["Stellar Network (Protocol 26 Settlement)"]
-        SDEX["SDEX Central Limit Order Books (MEV-Free SCP Shuffling)"]
+        SDEX["SDEX Central Limit Order Books (no public mempool — not an MEV guarantee)"]
         Soroban["Soroban Smart Contract AMMs (SEP-41 Token Pools)"]
         SAC["Soroban SAC RWA Contracts (FOBXX Benji, JQQQ, USTBL)"]
     end
@@ -177,7 +177,7 @@ graph TD
 ```mermaid
 flowchart TD
     UserReq["Trade Request: furlpay trade buy/limit/swap"] --> SOR["Smart Order Router (SOR)"]
-    
+
     SOR --> SDEX_Check["Evaluate SDEX Central Limit Order Book"]
     SOR --> AMM_Check["Evaluate Soroban AMM Pools (SEP-41)"]
     SOR --> Path_Check["Evaluate Cross-Asset Path Payment Multi-Hop Graph"]
@@ -188,22 +188,22 @@ flowchart TD
 
     BestRoute --> RegCheck{"Regulated Asset? (e.g. JQQQ, FOBXX)"}
 
-    RegCheck -- "Yes (AUTHORIZATION_REQUIRED)" --> SEP8_Query["Query Issuer stellar.toml Approval Server"]
-    SEP8_Query --> SEP8_Submit["Pre-flight submit partially signed XDR"]
-    SEP8_Submit --> KYC_Gate{"KYC Whitelist Verified?"}
-    KYC_Gate -- "Approved" --> SEP8_Attach["Attach Issuer Multi-Sig Co-Signature"]
-    KYC_Gate -- "Action Required" --> KYC_Prompt["Return Interactive KYC Onboarding URL"]
+    RegCheck -- "Yes" --> SEP8_Metadata["Consult SEP-8 metadata (regime, issuer domain)"]
+    SEP8_Metadata --> SEP8_Honest["NO approval is performed in this build:
+    result records sep8Status: not_performed —
+    resolve the real approval server from the
+    issuer's signed stellar.toml and verify there"]
+    SEP8_Honest --> SimRun["SIMULATED execution proceeds,
+    never claiming compliance"]
 
-    RegCheck -- "No (Standard SAC)" --> SponsorCheck{"--sponsor flag passed?"}
-    SEP8_Attach --> SponsorCheck
+    RegCheck -- "No" --> SimRun
 
-    SponsorCheck -- "Yes" --> FeeBump["Wrap into Stellar FeeBumpTransaction (Paid by FurlPay Vault)"]
-    SponsorCheck -- "No" --> UserFee["User Pays Native XLM Inclusion Fee"]
+    SimRun --> SponsorNote["--sponsor maps to a fee-bump envelope
+    in the simulation (no broadcast in this build)"]
 
-    FeeBump --> StellarCore["Stellar Core Consensus (SCP 5s Block)"]
-    UserFee --> StellarCore
-
-    StellarCore --> Settlement["Finalized Settlement: Randomized Execution and Uniform Price"]
+    SponsorNote --> Result["Labeled SIMULATED result:
+    dest_min / slippage bounds reported,
+    no network transaction broadcast"]
 ```
 
 ---
@@ -227,11 +227,11 @@ sequenceDiagram
     TB-->>MCP: Simulated settlement furlpay_simnet_* (no live TigerBeetle in this build)
     MCP-->>Agent: { status: "SIMULATED", settlementType: "LOCAL_SIMULATION", authHeader: "Authorization: x402 ..." }
 
-    Note over Agent,MCP: Automated Idle Treasury Yield Sweeping
-    Agent->>MCP: tools/call: furlpay_sweep_treasury { amountUsd: 450.00 }
-    MCP->>Stellar: Soroban SAC Deposit into Franklin FOBXX (Benji) Contract
-    Stellar-->>MCP: Shares Minted (4.85% APY On-Chain Yield)
-    MCP-->>Agent: { status: "SUCCESS", shares_minted: "450.00", apy: "4.85%" }
+    Note over Agent,MCP: Automated Idle Treasury Yield Sweeping (FOBXX leg = SIMULATED)
+    Agent->>MCP: tools/call: furlpay_sweep_treasury { amountUsd: 450.00, target: "FOBXX" }
+    Note over MCP,Stellar: No Stellar Benji contract call exists in this build — nothing is broadcast
+    MCP-->>Agent: { status: "SIMULATED", simulated: true, shares_minted: "450.00 (sample)", apy: null, apy_note: "no issuer data source — APY never fabricated" }
+    Note over Agent,MCP: HLP leg (target: "HLP") is the real signed path — see honesty matrix
 ```
 
 ---
@@ -275,7 +275,7 @@ furlpay trade limit \
   --price 104.20 \
   --sponsor
 
-# Path payment strict send (market buy) with guaranteed dest_min and zero MEV
+# Path payment strict send (market buy) with guaranteed dest_min slippage protection
 furlpay trade market-buy \
   --asset JQQQ:GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ \
   --with USDC \
@@ -321,7 +321,8 @@ furlpay rwa list --category equities,treasuries
 furlpay rwa inspect --asset JQQQ
 furlpay rwa inspect --asset FOBXX
 
-# Initiate or refresh accredited investor KYC verification
+# SEP-8 issuer KYC guidance — NOT implemented in this build: prints what must
+# be verified with the issuer and exits non-zero. It never reports an approval.
 furlpay rwa kyc --asset FOBXX --interactive
 ```
 
@@ -419,6 +420,42 @@ furlpay escrow status [--escrow-id escrow_1710000000000] [--verbose]
 
 ---
 
+### 8. Transaction Verification, Testnet Faucet & Diagnostics
+
+```bash
+# Verify a transaction against a real Horizon instance (mainnet shown).
+# Reports exactly what a lookup proves — and what it does NOT: an API lookup
+# of finalized ledger history, never claimed as cryptographic re-verification.
+# Exit 0 = confirmed successful; 1 = failed-on-chain / not found / invalid /
+# lookup unavailable. A 404 is explicitly NOT reported as "does not exist".
+furlpay tx verify <64-hex-hash> [--network mainnet|testnet] [--output json]
+
+# Fund a testnet/futurenet account via the official Stellar Friendbot.
+# Mainnet is refused outright — real XLM cannot be fabricated. `FUNDED` is
+# reported only on an actual successful Friendbot response, with the funding
+# tx hash and an independent Horizon balance check.
+furlpay faucet --address <G...> [--network testnet|futurenet] [--output json]
+
+# Validate the local config: canonical network passphrases, https endpoints,
+# slippage/risk bounds, and agent-trust cap consistency (single-tx cap may
+# not exceed the daily cap). Non-zero exit on any error.
+furlpay config validate [--output json]
+
+# Machine-readable diagnostics (also available as --output json); exits
+# non-zero when the API connectivity check fails so scripts can rely on it.
+furlpay doctor [--output json]
+```
+
+> **Verification semantics:** `tx verify` performs `GET /transactions/{hash}`
+> against the documented Horizon endpoint for the selected network. The
+> result distinguishes `CONFIRMED_SUCCESS`, `CONFIRMED_FAILED` (real tx,
+> failed on-chain), `NOT_FOUND` (with an explicit "not proof of absence"
+> disclaimer), `INVALID_HASH`, and `UNAVAILABLE` (a Horizon outage is never
+> evidence about the transaction). Verified live against Horizon mainnet and
+> testnet: a fresh Friendbot funding tx confirmed seconds after funding.
+
+---
+
 ## Model Context Protocol (MCP) AI Agents
 
 The CLI provides a standardized STDIO MCP server for Claude, Cursor, Gemini, and autonomous AI trading agents:
@@ -460,7 +497,7 @@ furlpay whoami              # active session and Safe address
 furlpay balance             # token balances across Arbitrum, Base, Optimism, Ethereum
 
 # A2A Transfers & Payments
-furlpay pay @recipient 10 usd   # instant zero-fee transfer to verified handle
+furlpay pay @recipient 10 usd   # A2A transfer to a verified handle (no FurlPay fee)
 furlpay send 25 0xAbc... --token USDC --chain arbitrum
 furlpay swap USDT USDC 100
 furlpay bridge 100 --from eth --to arb
@@ -485,12 +522,16 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | Surface | Status | Notes |
 |---|---|---|
 | Hyperliquid market data (`market`, `hyperliquid markets/status`) | **LIVE** | Real `/info` responses from Hyperliquid validators |
+| Transaction verification (`tx verify`) | **LIVE** (lookup) | Real Horizon `GET /transactions/{hash}`; distinguishes confirmed-success / confirmed-failed / not-found / invalid / unavailable; explicitly an API lookup, never claimed as cryptographic re-verification |
+| Testnet faucet (`faucet`) | **LIVE** | Real Friendbot funding on testnet/futurenet only (mainnet refused); `FUNDED` requires the Friendbot's own successful response + independent Horizon balance check |
+| Config validation (`config validate`) | **LOCAL** | Structural checks on the local config (canonical passphrases, https endpoints, risk bounds, cap consistency); no network calls |
+| Diagnostics (`doctor`) | **LIVE** checks | Real connectivity/registry checks; `--output json` schema; exits non-zero when the API liveness check fails |
 | HLP vault stats (`earn hlp stats`) | **LIVE** | Equity/APY/PnL derived from live `vaultDetails`; unreported fields → `unavailable`, never fabricated |
 | HLP deposit / withdraw | **LIVE** (signed) | Real EIP-712 `vaultTransfer` actions; fail closed without `HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY` |
 | Hyperliquid perp execution (`hyperliquid trade`) | **LIVE** (signed) | Requires configured signer; pre-trade risk engine enforced |
 | Escrow (`furlpay escrow`) | **LOCAL LEDGER** | Deterministic state machine + audit log at `~/.furlpay/escrows.json`; fund/release require real `--tx-hash` (never fabricated); no on-chain contract is deployed |
 | x402 settlement (`x402 pay`, MCP `furlpay_settle_invoice`) | **SIMULATED** | No live TigerBeetle facilitator in this build; responses say `SIMULATED` / `LOCAL_SIMULATION` |
-| Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build |
+| Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build. SEP-8: `rwa kyc` reports `NOT_IMPLEMENTED` (exit 1), and regulated-asset trade results carry `sep8Status: "not_performed"` — compliance is never claimed. Registry carries no hardcoded APY and no invented approval-server URLs. |
 | MCP `furlpay_balance` (unauthenticated mode) | **SIMULATED** | Sample fixture balances, flagged `simulated: true` |
 | FOBXX sweep (`furlpay_sweep_treasury` target FOBXX) | **SIMULATED** | No Stellar Benji contract call in this build |
 

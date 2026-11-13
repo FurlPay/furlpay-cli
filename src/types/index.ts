@@ -101,9 +101,10 @@ export interface RwaAsset {
   name: string;
   category: "equities" | "treasuries" | "yield";
   requiresSep8: boolean;
-  approvalServer?: string;
+  // No `apy` and no `approvalServer` here, deliberately: hardcoded yields
+  // and bundled compliance URLs would be fabrication. Resolve both from the
+  // issuer's signed stellar.toml / live registry data at display time.
   regime: string;      // e.g. "SEC Reg D / Reg S", "MiCA", "MAS"
-  apy?: string;
   cik?: string;
   description: string;
 }
@@ -146,6 +147,11 @@ export interface AgentPolicy {
   allowedAssets: string[];
   singleTxCapUsd: number;
   expiryTimestamp: number;
+  /** Set by revokeAgentKey — revoked keys fail policy validation immediately. */
+  revoked?: boolean;
+  revokedAt?: string;
+  /** UTC date (YYYY-MM-DD) the spentTodayUsd counter belongs to; resets when the day rolls over. */
+  lastSpendDay?: string;
 }
 
 export interface McpToolCall {

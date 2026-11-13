@@ -69,7 +69,7 @@ export class FurlPayInteractiveTerminal {
   private readonly paletteCommands = [
     { cmd: "/markets", desc: "Open dynamic cross-chain market selector" },
     { cmd: "/quote", desc: "Get real-time market quote and spread" },
-    { cmd: "/pay", desc: "Prepare instant zero-fee A2A payment" },
+    { cmd: "/pay", desc: "Prepare A2A payment (no FurlPay fee)" },
     { cmd: "/swap", desc: "Calculate cross-chain swap routes" },
     { cmd: "/plan", desc: "Switch to autonomous planning mode" },
     { cmd: "/risk", desc: "Inspect Hawkes volatility and kill-switch" },
