@@ -420,6 +420,42 @@ furlpay escrow status [--escrow-id escrow_1710000000000] [--verbose]
 
 ---
 
+### 8. Transaction Verification, Testnet Faucet & Diagnostics
+
+```bash
+# Verify a transaction against a real Horizon instance (mainnet shown).
+# Reports exactly what a lookup proves — and what it does NOT: an API lookup
+# of finalized ledger history, never claimed as cryptographic re-verification.
+# Exit 0 = confirmed successful; 1 = failed-on-chain / not found / invalid /
+# lookup unavailable. A 404 is explicitly NOT reported as "does not exist".
+furlpay tx verify <64-hex-hash> [--network mainnet|testnet] [--output json]
+
+# Fund a testnet/futurenet account via the official Stellar Friendbot.
+# Mainnet is refused outright — real XLM cannot be fabricated. `FUNDED` is
+# reported only on an actual successful Friendbot response, with the funding
+# tx hash and an independent Horizon balance check.
+furlpay faucet --address <G...> [--network testnet|futurenet] [--output json]
+
+# Validate the local config: canonical network passphrases, https endpoints,
+# slippage/risk bounds, and agent-trust cap consistency (single-tx cap may
+# not exceed the daily cap). Non-zero exit on any error.
+furlpay config validate [--output json]
+
+# Machine-readable diagnostics (also available as --output json); exits
+# non-zero when the API connectivity check fails so scripts can rely on it.
+furlpay doctor [--output json]
+```
+
+> **Verification semantics:** `tx verify` performs `GET /transactions/{hash}`
+> against the documented Horizon endpoint for the selected network. The
+> result distinguishes `CONFIRMED_SUCCESS`, `CONFIRMED_FAILED` (real tx,
+> failed on-chain), `NOT_FOUND` (with an explicit "not proof of absence"
+> disclaimer), `INVALID_HASH`, and `UNAVAILABLE` (a Horizon outage is never
+> evidence about the transaction). Verified live against Horizon mainnet and
+> testnet: a fresh Friendbot funding tx confirmed seconds after funding.
+
+---
+
 ## Model Context Protocol (MCP) AI Agents
 
 The CLI provides a standardized STDIO MCP server for Claude, Cursor, Gemini, and autonomous AI trading agents:
@@ -486,6 +522,10 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | Surface | Status | Notes |
 |---|---|---|
 | Hyperliquid market data (`market`, `hyperliquid markets/status`) | **LIVE** | Real `/info` responses from Hyperliquid validators |
+| Transaction verification (`tx verify`) | **LIVE** (lookup) | Real Horizon `GET /transactions/{hash}`; distinguishes confirmed-success / confirmed-failed / not-found / invalid / unavailable; explicitly an API lookup, never claimed as cryptographic re-verification |
+| Testnet faucet (`faucet`) | **LIVE** | Real Friendbot funding on testnet/futurenet only (mainnet refused); `FUNDED` requires the Friendbot's own successful response + independent Horizon balance check |
+| Config validation (`config validate`) | **LOCAL** | Structural checks on the local config (canonical passphrases, https endpoints, risk bounds, cap consistency); no network calls |
+| Diagnostics (`doctor`) | **LIVE** checks | Real connectivity/registry checks; `--output json` schema; exits non-zero when the API liveness check fails |
 | HLP vault stats (`earn hlp stats`) | **LIVE** | Equity/APY/PnL derived from live `vaultDetails`; unreported fields → `unavailable`, never fabricated |
 | HLP deposit / withdraw | **LIVE** (signed) | Real EIP-712 `vaultTransfer` actions; fail closed without `HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY` |
 | Hyperliquid perp execution (`hyperliquid trade`) | **LIVE** (signed) | Requires configured signer; pre-trade risk engine enforced |

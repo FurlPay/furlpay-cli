@@ -28,6 +28,9 @@ import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
 import { EscrowStore } from "./settlement/escrowStore";
 import { sanitizeTerminal } from "./tui/sanitize";
+import { verifyTransaction, TxVerificationResult } from "./stellar/txVerify";
+import { requestFunds, isValidStellarAddress, FaucetResult, FaucetNetwork } from "./stellar/faucet";
+import { validateConfig } from "./config/validate";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -171,6 +174,14 @@ export class FurlPayStellarCli {
 
       case "escrow":
         await this.handleEscrow(subcommand, args, flags);
+        break;
+
+      case "tx":
+        await this.handleTx(subcommand, args, flags);
+        break;
+
+      case "faucet":
+        await this.handleFaucet(subcommand, args, flags);
         break;
 
       case "config":
@@ -1152,9 +1163,156 @@ export class FurlPayStellarCli {
     process.exitCode = 1;
   }
 
+  /**
+   * `furlpay tx verify <hash>` — real Horizon lookup with honest semantics.
+   * Exit codes: 0 confirmed-success; 1 for confirmed-failed (the transaction
+   * is real but failed on-chain), not-found, invalid hash, and lookup
+   * unavailable. JSON via --output json.
+   */
+  private async handleTx(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const positional = [subcommand, ...args].filter(
+      (a) => a !== undefined && a !== "verify" && a !== "tx"
+    );
+    const isVerify = subcommand === "verify" || args[0] === "verify";
+
+    if (!isVerify) {
+      console.log("Usage: furlpay tx verify <hash> [--network mainnet|testnet] [--output json]");
+      console.log("  Performs a real Horizon GET /transactions/{hash} lookup and reports");
+      console.log("  exactly what was verified — an API lookup of finalized ledger history,");
+      console.log("  not an independent cryptographic re-verification.");
+      console.log("  (furlpay tx <hash> without 'verify' uses the FurlPay app-server lookup.)");
+      process.exitCode = 1;
+      return;
+    }
+
+    const hash = positional[0] ?? "";
+    const network = String(flags.network || "mainnet").toLowerCase() === "testnet" ? "testnet" : "mainnet";
+    const json = flags.output === "json" || flags.json;
+
+    const result: TxVerificationResult = await verifyTransaction(hash, { network });
+
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      const label: Record<string, string> = {
+        CONFIRMED_SUCCESS: "CONFIRMED (successful)",
+        CONFIRMED_FAILED: "CONFIRMED (failed on-chain)",
+        NOT_FOUND: "NOT FOUND",
+        INVALID_HASH: "INVALID HASH",
+        UNAVAILABLE: "LOOKUP UNAVAILABLE",
+      };
+      console.log(`Transaction: ${result.hash || "(none given)"}`);
+      console.log(`Network:     ${result.network}  (Horizon: ${result.horizonUrl})`);
+      console.log(`Status:      ${label[result.status] ?? result.status}`);
+      if (result.found) {
+        console.log(`  Successful:    ${result.found.successful}`);
+        console.log(`  Ledger:        ${result.found.ledger ?? "?"}`);
+        console.log(`  Created at:    ${result.found.createdAt ?? "?"}`);
+        console.log(`  Source:        ${result.found.sourceAccount ?? "?"}`);
+        console.log(`  Operations:    ${result.found.operationCount ?? "?"}`);
+        console.log(`  Fee (stroops): ${result.found.feePaidStroops ?? "?"}`);
+        console.log(`  Result XDR:    ${result.found.resultXdr ?? "?"}`);
+      }
+      if (result.error) console.log(`  Error:         ${result.error}`);
+      console.log(`\nWhat was verified:    ${result.whatWasVerified}`);
+      console.log(`What was NOT verified: ${result.whatWasNotVerified}`);
+    }
+
+    process.exitCode = result.status === "CONFIRMED_SUCCESS" ? 0 : 1;
+  }
+
+  /**
+   * `furlpay faucet --address <G...> --network testnet|futurenet` — real
+   * Friendbot funding. Mainnet is refused (no faucet exists there); funding
+   * is only reported on an actual successful Friendbot response.
+   */
+  private async handleFaucet(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const address = flags.address || flags.addr || subcommand || args[0];
+    const networkRaw = String(flags.network || "testnet").toLowerCase();
+    const json = flags.output === "json" || flags.json;
+
+    if (!address) {
+      console.log("Usage: furlpay faucet --address <G...> [--network testnet|futurenet] [--output json]");
+      console.log("  Funds a testnet/futurenet account via the official Stellar Friendbot.");
+      console.log("  Mainnet is refused: real XLM cannot be fabricated.");
+      process.exitCode = 1;
+      return;
+    }
+
+    if (networkRaw === "mainnet") {
+      const msg = "Refused: the Stellar mainnet has no faucet. Friendbot only exists on testnet and futurenet — real XLM cannot be fabricated.";
+      if (json) console.log(JSON.stringify({ address, network: networkRaw, funded: false, error: msg }, null, 2));
+      else console.error(`[!] ${msg}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (networkRaw !== "testnet" && networkRaw !== "futurenet") {
+      const msg = `Unknown network "${networkRaw}". Supported: testnet, futurenet.`;
+      if (json) console.log(JSON.stringify({ address, network: networkRaw, funded: false, error: msg }, null, 2));
+      else console.error(`[!] ${msg}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!isValidStellarAddress(String(address))) {
+      const msg = "Invalid Stellar address — pass a valid G... public key (validated locally before any network request).";
+      if (json) console.log(JSON.stringify({ address: String(address), network: networkRaw, funded: false, error: msg }, null, 2));
+      else console.error(`[!] ${msg}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const result: FaucetResult = await requestFunds(String(address), { network: networkRaw as FaucetNetwork });
+
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Faucet:    ${result.friendbotUrl}`);
+      console.log(`Account:   ${result.address}`);
+      console.log(`Network:   ${result.network}`);
+      if (result.funded) {
+        console.log(`Result:    FUNDED — Friendbot reported a successful funding transaction`);
+        if (result.transactionHash) console.log(`  Tx hash:  ${result.transactionHash}`);
+        if (result.ledger !== null) console.log(`  Ledger:   ${result.ledger}`);
+        if (result.balanceVerified === true) console.log(`  Balance:  verified > 0 via Horizon account lookup`);
+        else if (result.balanceVerified === false) console.log(`  Balance:  Horizon shows no native balance yet (history lag) — funding response was still successful`);
+        else console.log(`  Balance:  verification unavailable (Horizon lookup did not complete)`);
+        if (result.transactionHash) console.log(`  Verify:   furlpay tx verify ${result.transactionHash} --network ${result.network}`);
+      } else {
+        console.log(`Result:    NOT FUNDED — ${result.error}`);
+      }
+    }
+
+    process.exitCode = result.funded ? 0 : 1;
+  }
+
   private async handleConfig(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
     const sub = subcommand || args[0];
     const cfg = loadConfig();
+
+    if (sub === "validate") {
+      const json = flags.output === "json" || flags.json;
+      const { valid, checks } = validateConfig(cfg);
+
+      if (json) {
+        console.log(JSON.stringify({ configPath: getConfigPath(), valid, checks }, null, 2));
+      } else {
+        console.log(`Validating configuration at ${getConfigPath()}\n`);
+        for (const c of checks) {
+          const mark = c.ok ? "[✓]" : c.severity === "error" ? "[✗]" : "[!]";
+          console.log(`  ${mark} ${c.name.padEnd(42)} ${c.detail}`);
+        }
+        const failed = checks.filter((c) => !c.ok && c.severity === "error");
+        console.log(
+          valid
+            ? `\nConfiguration is valid${checks.some((c) => !c.ok) ? " (warnings present)" : ""}.`
+            : `\nConfiguration is INVALID — ${failed.length} error(s). Fix them before relying on network or risk settings.`
+        );
+      }
+      process.exitCode = valid ? 0 : 1;
+      return;
+    }
 
     if (sub === "path") {
       console.log(getConfigPath());
@@ -1181,7 +1339,7 @@ export class FurlPayStellarCli {
       return;
     }
 
-    console.log("Usage: furlpay config <show|path|get|set>");
+    console.log("Usage: furlpay config <show|path|get|set|validate>");
   }
 
   private printHelp(): void {
@@ -1202,7 +1360,9 @@ COMMANDS:
   rwa          Browse, verify compliance, and inspect tokenized stocks & RWAs (list, inspect, kyc)
   x402         Inspect and settle HTTP 402 agent micropayment challenges (pay)
   mcp          Launch local Model Context Protocol server for AI agent runtimes
-  config       Display and update CLI network, RPC, and keyring settings (show, path, get, set)
+  config       Display, update, and validate CLI network, RPC, and keyring settings (show, path, get, set, validate)
+  tx verify    Verify a real Stellar transaction against Horizon (honest lookup semantics, --output json)
+  faucet       Fund a testnet/futurenet account via the official Stellar Friendbot (refuses mainnet)
 `);
   }
 }

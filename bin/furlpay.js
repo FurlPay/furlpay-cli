@@ -116,12 +116,15 @@ ${c.bold("Cross-Chain Payments & Banking")}
   pay <@handle> <amt> [USD|USDC]                 A2A transfer to a verified handle (no FurlPay fee)
   pay <order-id>                                 Pay an order / payment link
   tx [<hash>|list] [--category swap]             Transaction lookup & history
+  tx verify <hash> [--network testnet]           Real Horizon transaction lookup — honest verification semantics
 
 ${c.bold("CLI Management")}
   update [--check]                              Check npm for a newer release (no changes)
   update [--latest | --channel beta]            Update to the latest stable / beta build
   update --version 0.2.2                        Pin or roll back to an exact version
-  doctor                                        Diagnose install, config, and connectivity
+  doctor [--output json]                        Diagnose install, config, and connectivity
+  faucet --address <G...> [--network testnet]   Fund testnet/futurenet via the official Friendbot (refuses mainnet)
+  completion <bash|zsh|fish|powershell>         Shell completion script
 
 ${c.bold("Global flags")}
   --sponsor   --output json|table   --quiet   --env sandbox|live   --yes
@@ -177,7 +180,7 @@ async function main() {
     case "logout": return commands.logout(args, flags);
     case "whoami": return commands.whoami(args, flags);
     case "config": {
-      if (args[0] === "show" || args[0] === "path" || flags.toml) {
+      if (args[0] === "show" || args[0] === "path" || args[0] === "validate" || flags.toml) {
         return getStellarCli().run({ command: "config", subcommand: args[0], args: args.slice(1), flags });
       }
       return commands.config(args, flags);
@@ -192,7 +195,16 @@ async function main() {
     case "swap": return commands.swap(args, flags);
     case "bridge": return commands.bridge(args, flags);
     case "pay": return commands.pay(args, flags);
-    case "tx": return commands.tx(args, flags);
+    // `tx verify <hash>` performs a real Horizon lookup (honest verification
+    // semantics); everything else keeps the app-server transaction commands.
+    case "tx": {
+      if (args[0] === "verify") {
+        return getStellarCli().run({ command: "tx", subcommand: args[0], args: args.slice(1), flags });
+      }
+      return commands.tx(args, flags);
+    }
+    case "faucet":
+      return getStellarCli().run({ command: "faucet", subcommand: args[0], args: args.slice(1), flags });
 
     case "hyperliquid":
     case "hlp":

@@ -56,4 +56,7 @@ export * from "./services/market-data";
 export * from "./market/types";
 export * from "./market/registry";
 export * from "./market/discovery";
+export * from "./stellar/txVerify";
+export * from "./stellar/faucet";
+export * from "./config/validate";
 export * from "./cli";
