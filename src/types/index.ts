@@ -147,6 +147,11 @@ export interface AgentPolicy {
   allowedAssets: string[];
   singleTxCapUsd: number;
   expiryTimestamp: number;
+  /** Set by revokeAgentKey — revoked keys fail policy validation immediately. */
+  revoked?: boolean;
+  revokedAt?: string;
+  /** UTC date (YYYY-MM-DD) the spentTodayUsd counter belongs to; resets when the day rolls over. */
+  lastSpendDay?: string;
 }
 
 export interface McpToolCall {

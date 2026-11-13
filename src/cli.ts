@@ -28,7 +28,7 @@ import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
 import { EscrowStore } from "./settlement/escrowStore";
 import { sanitizeTerminal } from "./tui/sanitize";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
 
@@ -231,7 +231,43 @@ export class FurlPayStellarCli {
       console.log(`    - Public Key:  ${generated.policy.publicKey}`);
       console.log(`    - Policy:      Daily spend cap \$${dailyLimit} USD, Assets: [${allowed.join(", ")}]`);
       console.log(`    - Expiry:      ${expiry} days (${new Date(generated.policy.expiryTimestamp).toISOString()})`);
-      console.log(`    - Stored in:   ~/.furlpay/agent_policies/${name}.json`);
+      console.log(`    - Stored in:   ~/.furlpay/agent-policies/${name}.json (secret key sealed with AES-256-GCM)`);
+      console.log(`[i] Revoke at any time: furlpay wallet agent-revoke ${name}`);
+      return;
+    }
+
+    if (sub === "agent-list") {
+      const keys = this.agentKeys.listAgentKeys();
+      if (keys.length === 0) {
+        console.log("No delegated agent keys found (create one: furlpay wallet agent-keygen --name <name>).");
+        return;
+      }
+      console.log(`Delegated agent keys (${keys.length}):`);
+      for (const k of keys) {
+        const tag = k.revoked ? "[REVOKED]" : "[active]";
+        console.log(`  ${k.name.padEnd(20)} ${k.publicKey}  ${tag}  expires ${k.expiresAt}`);
+      }
+      return;
+    }
+
+    if (sub === "agent-revoke") {
+      const name = flags.name || args[0];
+      const keys = this.agentKeys.listAgentKeys();
+      if (!name) {
+        console.log("Usage: furlpay wallet agent-revoke <name>");
+        console.log(`Known agent keys: ${keys.map((k) => k.name).join(", ") || "(none)"}`);
+        process.exitCode = 1;
+        return;
+      }
+      const res = this.agentKeys.revokeAgentKey(name);
+      if (!res) {
+        console.error(`[!] No agent key named "${name}" exists. Known: ${keys.map((k) => k.name).join(", ") || "(none)"}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`[✓] Agent key "${res.agentName}" revoked at ${res.revokedAt}.`);
+      console.log(`    Public key: ${res.publicKey}`);
+      console.log(`    Every spend validation fails from now on; the policy file is kept as an audit record.`);
       return;
     }
 
@@ -276,7 +312,7 @@ export class FurlPayStellarCli {
       return;
     }
 
-    console.log("Usage: furlpay wallet <connect ledger|connect walletconnect|connect extension|agent-keygen|import|list>");
+    console.log("Usage: furlpay wallet <connect ledger|connect walletconnect|connect extension|agent-keygen|agent-list|agent-revoke|import|list>");
     console.log("  import: the secret key and password come from --secret-key/--password or stdin lines (never echoed, never logged).");
   }
 
