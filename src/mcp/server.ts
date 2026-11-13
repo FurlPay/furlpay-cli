@@ -393,7 +393,9 @@ export class McpStdioServer {
           };
         } else {
           // SIMULATED — no FOBXX/BENJI contract call exists in this build;
-          // the shares/APY below are sample data, not a deposit record.
+          // shares below are sample data, not a deposit record. No APY is
+          // reported: there is no issuer data source here, and any figure
+          // would be fabricated.
           return {
             simulated: true,
             notice: "SIMULATED — no Stellar deposit was broadcast and no FOBXX contract call was made.",
@@ -402,8 +404,9 @@ export class McpStdioServer {
             shares_minted: amt.toFixed(2),
             asset: "FOBXX",
             contract: "GBNX66T6Z3M7RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QFOBXX",
-            apy: "4.85% SEC Regulated Yield",
-            custodian: "Franklin Templeton Institutional",
+            apy: null,
+            apy_note: "not queried — no issuer data source in this build; treat any APY figure for FOBXX as unverified until read from the issuer",
+            custodian: "Franklin Templeton Institutional (reference)",
           };
         }
       }

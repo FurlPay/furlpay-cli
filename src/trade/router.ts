@@ -21,10 +21,20 @@ export interface RoutingQuote {
   slippageTolerancePct: number;
   minimumReceived: number;
   hops: RouteHop[];
-  mevImmunity: {
-    protocol: "SCP_RANDOMIZED_ORDERING";
-    frontRunningRisk: "ZERO";
-    uniformClearingPrice: true;
+  /**
+   * Honest execution-ordering properties of the quoted route.
+   *
+   * HONESTY CONTRACT: Stellar has no public transaction mempool, which makes
+   * pre-trade front-running of an unbroadcast transaction structurally
+   * harder than on mempool chains — but that is NOT an "MEV immunity"
+   * guarantee: validators may order transactions non-uniformly, Soroban AMM
+   * hops execute sequentially, and price impact still applies. Nothing here
+   * may claim ZERO risk (the old `frontRunningRisk: "ZERO"` was fabrication).
+   */
+  orderingProperties: {
+    protocol: "SCP";
+    publicMempool: false;
+    frontRunningRisk: "REDUCED_NOT_ELIMINATED";
   };
 }
 
@@ -102,10 +112,10 @@ export class SmartOrderRouter {
       slippageTolerancePct: slippagePct,
       minimumReceived: Number(minReceive.toFixed(7)),
       hops,
-      mevImmunity: {
-        protocol: "SCP_RANDOMIZED_ORDERING",
-        frontRunningRisk: "ZERO",
-        uniformClearingPrice: true,
+      orderingProperties: {
+        protocol: "SCP",
+        publicMempool: false,
+        frontRunningRisk: "REDUCED_NOT_ELIMINATED",
       },
     };
   }

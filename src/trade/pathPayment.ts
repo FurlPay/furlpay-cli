@@ -24,6 +24,9 @@ export interface PathPaymentExecutionResult {
   hopsCount: number;
   feePaidUsd: string;
   sponsored: boolean;
+  /** Honest SEP-8 status — for regulated assets approval is never performed in this build. */
+  sep8Status: "not_required" | "not_performed";
+  sep8Note?: string;
 }
 
 export class PathPaymentService {
@@ -52,12 +55,15 @@ export class PathPaymentService {
       slippage
     );
 
-    // 2. Check SEP-8 Compliance
+    // 2. SEP-8 status — recorded honestly, never claimed. The execution below
+    // is a SIMULATION; it proceeds for regulated assets, but the result says
+    // issuer authorization was NOT performed (no approval server exists here).
+    let sep8Status: "not_required" | "not_performed" = "not_required";
+    let sep8Note: string | undefined;
     if (this.sep8Engine.isRegulatedAsset(params.asset)) {
       const sep8Res = await this.sep8Engine.submitForApproval(params.asset, "PATH_PAYMENT_XDR", pubkey);
-      if (!sep8Res.approved) {
-        throw new Error(`SEP-8 compliance rejected: ${sep8Res.message}`);
-      }
+      sep8Status = "not_performed";
+      sep8Note = sep8Res.message;
     }
 
     // 3. Clear-signing confirmation if required
@@ -94,6 +100,8 @@ export class PathPaymentService {
       hopsCount: quote.hops.length,
       feePaidUsd: sponsored ? "0.0000000 (Sponsored)" : "0.0000120",
       sponsored,
+      sep8Status,
+      ...(sep8Note ? { sep8Note } : {}),
     };
   }
 }

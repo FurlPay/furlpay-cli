@@ -124,8 +124,8 @@ test("FurlPay Stellar: Smart Order Router (SDEX & Soroban AMM Multi-Hop)", async
   assert.strictEqual(quote.sourceAsset, "USDC");
   assert.strictEqual(quote.targetAsset, "JQQQ");
   assert.ok(quote.expectedReceiveAmount > 9.0);
-  assert.strictEqual(quote.mevImmunity.frontRunningRisk, "ZERO");
-  assert.strictEqual(quote.mevImmunity.uniformClearingPrice, true);
+  assert.strictEqual(quote.orderingProperties.frontRunningRisk, "REDUCED_NOT_ELIMINATED");
+  assert.strictEqual(quote.orderingProperties.publicMempool, false);
 });
 
 test("FurlPay Stellar: SDEX Limit Order Execution with SEP-8 & Fee-Bump Sponsorship", async () => {
@@ -146,7 +146,12 @@ test("FurlPay Stellar: SDEX Limit Order Execution with SEP-8 & Fee-Bump Sponsors
   assert.strictEqual(res.filledAmount, "25");
   assert.strictEqual(res.totalCost, "2605.0000");
   assert.strictEqual(res.sponsored, true);
-  assert.strictEqual(res.sep8Compliant, true);
+  // JQQQ is a SEP-8 regulated asset: this build never contacts an approval
+  // server, so the result must NOT claim compliance — it must say plainly
+  // that issuer authorization was not performed.
+  assert.strictEqual(res.sep8Compliant, false);
+  assert.strictEqual(res.sep8Status, "not_performed");
+  assert.ok(res.sep8Note.includes("not implemented in this build"));
   assert.ok(res.feePaidUsd.includes("Sponsored"));
 });
 
@@ -221,11 +226,15 @@ test("FurlPay Stellar: Institutional Tokenized Stocks & RWA Registry", () => {
   assert.ok(jqqq.regime.includes("SEC Reg D"));
   assert.strictEqual(jqqq.requiresSep8, true);
 
+  // Yields are issuer-reported, time-varying facts — the registry must never
+  // carry a hardcoded APY figure.
   const fobxx = rwa.inspect("FOBXX");
-  assert.strictEqual(fobxx.apy, "4.85%");
+  assert.strictEqual(fobxx.apy, undefined);
 
+  // No KYC provider is integrated: the flow must refuse to report an approval.
   const kyc = rwa.startKycFlow("FOBXX");
-  assert.strictEqual(kyc.status, "APPROVED");
+  assert.strictEqual(kyc.status, "NOT_IMPLEMENTED");
+  assert.ok(kyc.instructions.includes("no approval was granted"));
 });
 
 test("FurlPay Stellar: HTTP 402 Micropayment Engine & TigerBeetle Netting", async () => {
@@ -272,7 +281,10 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
   assert.strictEqual(fobxxSweep.status, "SIMULATED", "FOBXX sweep has no live contract call — must be labeled simulated");
   assert.strictEqual(fobxxSweep.simulated, true);
   assert.strictEqual(fobxxSweep.vault, "STELLAR_FOBXX_BENJI");
-  assert.ok(fobxxSweep.apy.includes("SEC Regulated Yield"));
+  // No issuer data source exists in this build — APY must be null, never a
+  // fabricated figure, with an explicit note explaining why.
+  assert.strictEqual(fobxxSweep.apy, null);
+  assert.ok(fobxxSweep.apy_note.includes("no issuer data source"));
 
   // Mutating tool without configured signer must strictly fail closed
   await assert.rejects(

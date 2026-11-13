@@ -83,23 +83,23 @@ ${c.bold("Stellar Wallet & Custody")}
 
 ${c.bold("Stellar Trading & Execution")}
   trade limit --side buy --asset JQQQ:GDXF...    SDEX limit order (--post-only, --sponsor)
-  trade market-buy --asset JQQQ --spend 1000     Path payment with zero MEV execution
+  trade market-buy --asset JQQQ --spend 1000     Path payment with dest_min slippage protection
   trade swap --pool-id <id> --asset FOBXX        Soroban AMM SEP-41 liquidity pool swap
   trade terminal [--pair JQQQ/USDC]              Interactive real-time ASCII depth chart
 
 ${c.bold("Order Book Management")}
   order list [--pair JQQQ/USDC]                  List active resting limit offers
   order inspect --offer-id <id>                  Inspect resting offer details
-  order cancel --offer-id <id> [--sponsor]       Cancel offer with zero gas fee
+  order cancel --offer-id <id> [--sponsor]       Cancel offer (fee sponsored via --sponsor)
   order cancel-all [--pair <pair>]               Batch cancel all resting offers
 
 ${c.bold("Tokenized Equities & RWAs (SEP-8)")}
   rwa list [--category equities,treasuries]      Institutional RWA registry (JQQQ, FOBXX, NVDA)
   rwa inspect --asset <sym>                      Inspect regulatory regime, CIK, and SEP-8
-  rwa kyc --asset <sym> [--interactive]          Accredited investor onboarding & verification
+  rwa kyc --asset <sym> [--interactive]          SEP-8 issuer KYC guidance (not implemented in this build)
 
 ${c.bold("x402 Micropayments & Agentic MCP")}
-  x402 pay --challenge-header <hdr>              HTTP 402 challenge resolution (<$0.0001 fee)
+  x402 pay --challenge-header <hdr>              HTTP 402 challenge resolution (SIMULATED settlement)
   mcp [--wallet agent-alpha]                     Run stdio Model Context Protocol tool server
 
 ${c.bold("Account & Authentication")}
@@ -113,7 +113,7 @@ ${c.bold("Cross-Chain Payments & Banking")}
   send <amount> <to> [--token USDC]              Gas-sponsored transfer (--mfa for ≥$5k)
   swap <from> <to> <amount>                      Token swap via Li.Fi (--quote-only)
   bridge <amount> --from eth --to arb            Cross-chain bridge (CCTP route)
-  pay <@handle> <amt> [USD|USDC]                 Instant zero-fee A2A transfer to verified handle
+  pay <@handle> <amt> [USD|USDC]                 A2A transfer to a verified handle (no FurlPay fee)
   pay <order-id>                                 Pay an order / payment link
   tx [<hash>|list] [--category swap]             Transaction lookup & history
 

@@ -375,7 +375,7 @@ export class FurlPayStellarCli {
       console.log(`[i] Simulated settlement: Ledger #${result.ledgerNumber} | sim hash: ${result.txHash.slice(0, 14)}…`);
       console.log(`    - Spent:     ${result.spentAmount} ${result.sourceAsset.split(":")[0]}`);
       console.log(`    - Received:  ${result.receivedAmount} ${result.targetAsset.split(":")[0]}`);
-      console.log(`    - Multi-Hop: ${result.hopsCount} route segments resolved with zero MEV`);
+      console.log(`    - Multi-Hop: ${result.hopsCount} route segments (Stellar has no public mempool; ordering is validator-shuffled — not an MEV guarantee)`);
       console.log(`    - Fee:       ${result.feePaidUsd}`);
       return;
     }
@@ -927,10 +927,11 @@ export class FurlPayStellarCli {
     if (sub === "list" || !sub) {
       const category = flags.category || "all";
       const list = this.rwa.list(category);
-      console.log(`Institutional Tokenized Stocks & RWAs (${list.length}):`);
+      console.log(`Institutional Tokenized Stocks & RWAs (${list.length}) — UNVERIFIED REFERENCE DATA:`);
+      console.log(`  issuer addresses and regimes are catalog entries, not on-chain-verified facts.`);
       for (const a of list) {
-        const sep8Tag = a.requiresSep8 ? "[SEP-8 KYC]" : "[PERMISSIONLESS]";
-        console.log(`  ${a.code.padEnd(8)} ${a.name.padEnd(35)} ${sep8Tag.padEnd(16)} ${a.regime}`);
+        const sep8Tag = a.requiresSep8 ? "[SEP-8 issuer auth required]" : "[PERMISSIONLESS]";
+        console.log(`  ${a.code.padEnd(8)} ${a.name.padEnd(35)} ${sep8Tag.padEnd(30)} ${a.regime}`);
       }
       return;
     }
@@ -942,22 +943,26 @@ export class FurlPayStellarCli {
         console.log(`Asset '${assetCode}' not found in institutional registry.`);
         return;
       }
-      console.log(`Asset Specification: ${asset.code}`);
+      console.log(`Asset Specification: ${asset.code}  (UNVERIFIED REFERENCE DATA)`);
       console.log(`  Name:             ${asset.name}`);
       console.log(`  Issuer:           ${asset.issuer}`);
       console.log(`  Category:         ${asset.category}`);
       console.log(`  Regime:           ${asset.regime}`);
-      console.log(`  SEC CIK:          ${asset.cik || "N/A"}`);
-      console.log(`  Approval Server:  ${asset.approvalServer || "None"}`);
+      console.log(`  SEC CIK:          ${asset.cik || "N/A (verify on SEC EDGAR)"}`);
+      console.log(`  Approval Server:  not bundled — resolve from the issuer's signed stellar.toml`);
       console.log(`  Description:      ${asset.description}`);
       return;
     }
 
     if (sub === "kyc") {
       const assetCode = flags.asset || args[0] || "JQQQ";
-      console.log(`[+] Initiating Accredited Investor Verification for ${assetCode}...`);
-      console.log(`[+] Identity verified: Tier 1 Accredited Investor (Regulation D 506(c))`);
-      console.log(`[✓] SEP-8 Compliance Pre-Approval Granted.`);
+      // No KYC provider is integrated; the old output here fabricated an
+      // "Accredited Tier 1 verified / Pre-Approval Granted" result with no
+      // verification performed. Refuse honestly instead.
+      const flow = this.rwa.startKycFlow(assetCode, Boolean(flags.interactive));
+      console.log(`[!] ${flow.instructions}`);
+      console.log(`[i] Status: NOT_IMPLEMENTED — nothing was verified and no approval exists.`);
+      process.exitCode = 1;
       return;
     }
 
@@ -1099,20 +1104,16 @@ export class FurlPayStellarCli {
   }
 
   private async handlePortfolio(args: string[], flags: Record<string, any>): Promise<void> {
-    console.log("┌────────────────────────────────────────────────────────────────────────┐");
-    console.log("│ FURLPAY CROSS-CHAIN UNIFIED PORTFOLIO                                  │");
-    console.log("├────────────────────────────────────────────────────────────────────────┤");
-    console.log("│ Chain          Asset       Balance            USD Value      Status    │");
-    console.log("│ ────────────────────────────────────────────────────────────────────── │");
-    console.log("│ Hyperliquid    USDC        14,850.20          \$14,850.20     AVAILABLE │");
-    console.log("│ Stellar        USDC        8,500.00           \$8,500.00      AVAILABLE │");
-    console.log("│ Stellar        JQQQ        25.00 shares       \$2,605.00      YIELDING  │");
-    console.log("│ Stellar        FOBXX       450.00 shares      \$450.00        BENJI YLD │");
-    console.log("│ Arbitrum       USDC        4,200.00           \$4,200.00      AVAILABLE │");
-    console.log("│ Ethereum       ETH         0.65 ETH           \$1,845.60      AVAILABLE │");
-    console.log("│ ────────────────────────────────────────────────────────────────────── │");
-    console.log("│ Total Portfolio Value: \$32,450.80 USD  ·  Margin Utilization: 14.2%   │");
-    console.log("└────────────────────────────────────────────────────────────────────────┘");
+    // A portfolio view must never invent balances. Cross-chain aggregation
+    // is not implemented in this build; the authenticated API suite has the
+    // real thing. (This previously rendered a hardcoded $32,450.80 sample
+    // table indistinguishable from live data — removed.)
+    console.log(`[!] Cross-chain portfolio aggregation is not implemented in this build.`);
+    console.log(`[i] No balances were queried and nothing below is real data.`);
+    console.log(`[i] For live balances run: furlpay balance            (authenticated API, all chains)`);
+    console.log(`    Hyperliquid clearinghouse: furlpay account balance  (live /info)`);
+    console.log(`    Stellar market data:       furlpay market <SYM>     (live)`);
+    process.exitCode = 1;
   }
 
   private async handleConfig(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
