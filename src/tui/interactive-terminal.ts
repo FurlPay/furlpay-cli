@@ -862,13 +862,12 @@ export class FurlPayInteractiveTerminal {
     lines.push(`│  ${this.C_TURQUOISE}${this.C_BOLD}TOKENIZED EQUITIES, RWAS & CLEARINGHOUSE YIELD${this.C_RESET}                                │`);
     lines.push(`├──────────────────────────────────────────────────────────────────────────────┤`);
     lines.push(`│  1. Hyperliquid HLP Clearinghouse Vault (Canonical Address: 0xdfc2...8158)    │`);
-    lines.push(`│     - Total Equity: \$150.72M USD   |  Share Price: \$1.4285                   │`);
-    lines.push(`│     - Instantaneous APR: 0.02%     |  Trailing 30d APY: 28.5%                │`);
+    lines.push(`│     - Live equity, APR and APY: furlpay earn hlp stats                       │`);
     lines.push(`│     - ${this.C_YELLOW}Protocol Notice: Mandatory 4-day (345,600s) withdrawal lockup${this.C_RESET}        │`);
     lines.push(`│                                                                              │`);
     lines.push(`│  2. Stellar Institutional Tokenized Stocks (Protocol 26)                     │`);
-    lines.push(`│     - JQQQ (Janus Henderson Tokenized Equity ETF): \$104.20 (SEP-8 Required)  │`);
-    lines.push(`│     - FOBXX (Franklin Templeton Benji US Govt Money Fund): 4.85% Yield       │`);
+    lines.push(`│     - JQQQ (Janus Henderson Tokenized Equity ETF): SEP-8 KYC Required        │`);
+    lines.push(`│     - FOBXX (Franklin Templeton Benji US Govt Money Fund): SEP-8 KYC Required│`);
     lines.push(`╰──────────────────────────────────────────────────────────────────────────────╯`);
     return lines.join("\n");
   }
