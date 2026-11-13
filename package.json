@@ -59,7 +59,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^15.1.0",
+    "@stellar/stellar-sdk": "^17.4.0",
     "algo-msgpack-with-bigint": "^2.1.1",
     "chalk": "^4.1.2",
     "cli-table3": "^0.6.5",

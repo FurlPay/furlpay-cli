@@ -19,7 +19,7 @@
    `mandateId`/`agentId` present — the CLI-side gates are advisory until then.
 2. **Approval-UI attestation step** (M-1): "this code was shown on YOUR terminal".
 3. **Revocation denylist fail-closed during KV outage** (M-2, `session.ts`).
-4. **Stellar-sdk 17 upgrade** (S-1) with full regression, replacing `npm audit fix --force`.
+4. ~~**Stellar-sdk 17 upgrade** (S-1)~~ **DONE (pass four, 2026-11-13)**: `@stellar/stellar-sdk ^15.1.0 → ^17.4.0` via package.json (not `audit fix --force`). Clears every audit path — v17 depends on `axios@1.20.0` and replaces `toml` with `smol-toml`; `npm audit`: **0 vulnerabilities** (was 3 high locally / 42 Dependabot alerts on GitHub). Sole API break: `Keypair.sign()` now returns `Uint8Array`, so `signChallenge` re-wraps in `Buffer` before base64. Regression: typecheck ✓ build ✓ `npm test` exit 0 (162 ✔) ✓ pack ✓.
 
 ### Completed — pass three (2026-11-13, CLI side)
 | ID | Fix | Tests |

@@ -33,7 +33,9 @@ export class KeypairSigner implements SignerInterface {
 
   async signChallenge(challenge: string): Promise<string> {
     const buffer = Buffer.from(challenge, "utf-8");
-    return this.keypair.sign(buffer).toString("base64");
+    // stellar-sdk v17 returns Uint8Array (not Buffer), so re-wrap before the
+    // base64 encoding overload of Buffer#toString.
+    return Buffer.from(this.keypair.sign(buffer)).toString("base64");
   }
 
   async clearSignVerification(details: {
