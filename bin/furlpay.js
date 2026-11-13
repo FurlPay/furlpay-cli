@@ -117,6 +117,12 @@ ${c.bold("Cross-Chain Payments & Banking")}
   pay <order-id>                                 Pay an order / payment link
   tx [<hash>|list] [--category swap]             Transaction lookup & history
 
+${c.bold("CLI Management")}
+  update [--check]                              Check npm for a newer release (no changes)
+  update [--latest | --channel beta]            Update to the latest stable / beta build
+  update --version 0.2.2                        Pin or roll back to an exact version
+  doctor                                        Diagnose install, config, and connectivity
+
 ${c.bold("Global flags")}
   --sponsor   --output json|table   --quiet   --env sandbox|live   --yes
 `);
@@ -178,6 +184,7 @@ async function main() {
     }
     case "env": return commands.env(args, flags);
     case "status": return commands.status(args, flags);
+    case "update": return require("../lib/update").run(flags);
 
     // ---- wallet & payments ------------------------------------------------
     case "balance": return commands.balance(args, flags);

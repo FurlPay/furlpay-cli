@@ -1,0 +1,243 @@
+name: Release
+
+# Tag-driven release pipeline. Push a tag that matches package.json:
+#   git tag v0.4.0 && git push origin v0.4.0
+#
+# Stages:
+#   verify      typecheck, entrypoint/version-sync checks, unit tests, npm pack
+#   smoke       install the packed tarball on all three OSes and run the CLI
+#   release     GitHub Release with tarball + SHA-256 checksums + SBOM +
+#               sigstore build-provenance attestations
+#   publish-npm npm publish with provenance (OIDC trusted publishing, or a
+#               granular token via vars.NPM_PUBLISH_MODE=token)
+#
+# `workflow_dispatch` runs verify+smoke only — nothing is published.
+# A failed gate anywhere prevents both the GitHub Release and the npm publish.
+# (The separate publish-mcp.yml also fires on v* tags and pushes the MCP
+# Registry metadata; scripts/build.js keeps package.json and server.json
+# version-locked so the two can never diverge.)
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  verify:
+    name: Verify (build · typecheck · tests · pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Tag must match package.json version
+        if: github.ref_type == 'tag'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "Releasing v$TAG_VERSION"
+
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run verify
+      - run: npm run build
+      - run: npm test
+
+      # Advisory only (continue-on-error): the supply-chain posture is
+      # reviewed per-release by maintainers; see docs/audits/SUPPLY_CHAIN_AUDIT.md.
+      - name: Dependency audit (advisory)
+        run: npm audit --omit=dev || true
+
+      - name: Pack tarball
+        run: npm pack
+
+      - name: Tarball contents sanity check
+        run: |
+          ls -1 furlpay-cli-*.tgz
+          tar -tzf furlpay-cli-*.tgz | tee /tmp/contents.txt
+          for entry in package/bin/furlpay.js package/lib/util.js package/dist/cli.js package/package.json package/LICENSE; do
+            grep -qx "$entry" /tmp/contents.txt || { echo "::error::$entry missing from tarball"; exit 1; }
+          done
+
+      - name: Generate SBOM (CycloneDX, from lockfile)
+        run: npm sbom --sbom-format cyclonedx --sbom-file sbom.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tarball
+          path: furlpay-cli-*.tgz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test tarball (${{ matrix.os }})
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-tarball
+
+      - name: Install from tarball
+        shell: bash
+        run: npm install -g furlpay-cli-*.tgz
+
+      - name: Version, help, update-check, doctor
+        shell: bash
+        run: |
+          furlpay --version
+          furlpay --help > /dev/null
+          furlpay update --check
+          furlpay doctor || true   # connectivity sections may be unreachable on CI — informational
+
+      - name: MCP server boots (initialize handshake)
+        shell: bash
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | furlpay mcp > mcp-out.jsonl
+          grep -q "serverInfo" mcp-out.jsonl && grep -q "furlpay" mcp-out.jsonl
+
+  release:
+    name: GitHub Release (checksums · SBOM · attestations)
+    needs: [verify, smoke]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the Release and upload assets
+      id-token: write     # sigstore provenance attestations
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-tarball
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-sbom
+
+      - name: Generate checksums
+        run: |
+          TARBALL="$(ls -1 furlpay-cli-*.tgz)"
+          sha256sum "$TARBALL" > checksums.txt
+          sha256sum sbom.cdx.json >> checksums.txt
+
+      - name: Attest build provenance (tarball, checksums, SBOM)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            furlpay-cli-*.tgz
+            checksums.txt
+            sbom.cdx.json
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cat > release-notes.md <<'EOF'
+          See [CHANGELOG.md](https://github.com/FurlPay/furlpay-cli/blob/main/CHANGELOG.md) for the full changelog.
+
+          **Assets**
+          - `furlpay-cli-<version>.tgz` — the exact tarball published to npm (offline install: `npm install -g ./furlpay-cli-<version>.tgz`)
+          - `checksums.txt` — SHA-256 digests
+          - `sbom.cdx.json` — CycloneDX SBOM built from the lockfile
+
+          **Integrity**
+          Every asset carries a sigstore build-provenance attestation (verify on the
+          [attestations tab](https://github.com/FurlPay/furlpay-cli/attestations)). The npm
+          package is published with provenance from this same commit.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading assets only."
+            gh release upload "$TAG" furlpay-cli-*.tgz checksums.txt sbom.cdx.json --clobber
+          else
+            gh release create "$TAG" \
+              --title "FurlPay CLI $TAG" \
+              --generate-notes \
+              --notes-file release-notes.md \
+              furlpay-cli-*.tgz checksums.txt sbom.cdx.json
+          fi
+
+  publish-npm:
+    name: Publish @furlpay/cli to npm
+    needs: [verify, smoke]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm provenance / trusted publishing (OIDC)
+    environment: npm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Node 24 ships npm ≥ 11.5, required for OIDC trusted publishing.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org/
+
+      - name: Auth mode
+        run: |
+          if [ "${NPM_PUBLISH_MODE}" = "token" ]; then
+            echo "Publishing with NPM_PUBLISH_TOKEN (granular publishing token)."
+          else
+            echo "Publishing via npm trusted publishing (OIDC) — must be configured for"
+            echo "@furlpay/cli at npmjs.com → Package settings → Trusted Publisher:"
+            echo "  repository: FurlPay/furlpay-cli · workflow: release.yml · environment: npm"
+          fi
+        env:
+          NPM_PUBLISH_MODE: ${{ vars.NPM_PUBLISH_MODE }}
+
+      - run: npm ci --ignore-scripts
+
+      - name: npm publish (trusted publishing / OIDC)
+        if: vars.NPM_PUBLISH_MODE != 'token'
+        run: npm publish --access public --provenance
+
+      - name: npm publish (granular token)
+        if: vars.NPM_PUBLISH_MODE == 'token'
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+
+      - name: Verify package availability on the registry
+        run: |
+          EXPECTED="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 12); do
+            PUBLISHED="$(npm view @furlpay/cli version 2>/dev/null || true)"
+            if [ "$PUBLISHED" = "$EXPECTED" ]; then
+              echo "npm now serves @furlpay/cli@$PUBLISHED"
+              exit 0
+            fi
+            echo "waiting for registry propagation ($PUBLISHED != $EXPECTED) …"
+            sleep 10
+          done
+          echo "::error::npm did not serve v$EXPECTED within 120s"
+          exit 1

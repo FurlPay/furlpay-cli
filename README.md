@@ -19,6 +19,81 @@ furlpay trade terminal --pair JQQQ/USDC
 
 ---
 
+# Install FurlPay CLI
+
+**Requires Node.js ≥ 22.19.0** (npm ships with it). Works on Linux, macOS,
+and Windows — no administrator/root privileges needed. Full details,
+verification, troubleshooting and uninstall steps:
+[docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+### npm — recommended
+
+```bash
+npm install -g @furlpay/cli
+furlpay --version
+```
+
+### Quick install — macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FurlPay/furlpay-cli/main/install.sh | sh
+```
+
+The script verifies Node/npm, warns on unofficial registry mirrors, never
+uses sudo, and verifies the installed version afterwards. Inspect it first,
+or run `sh install.sh --help` for pinning (`--version X.Y.Z`), the beta
+channel (`--channel beta`), `--dry-run`, and `--uninstall`.
+
+### Quick install — Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/FurlPay/furlpay-cli/main/install.ps1 | iex
+```
+
+Same checks and options (`-Version`, `-Channel`, `-DryRun`, `-Uninstall`),
+per-user, no elevation.
+
+### npx — no global install
+
+```bash
+npx @furlpay/cli --help
+```
+
+### Other package managers
+
+```bash
+pnpm add -g @furlpay/cli     # or: yarn global add @furlpay/cli / bun install -g @furlpay/cli
+```
+
+### Offline install from the release tarball
+
+Each [release](https://github.com/FurlPay/furlpay-cli/releases) publishes the
+exact npm tarball plus `checksums.txt`, a CycloneDX SBOM, and sigstore
+build-provenance attestations:
+
+```bash
+sha256sum -c checksums.txt --ignore-missing   # verify first
+npm install -g ./furlpay-cli-<version>.tgz
+```
+
+> **Standalone binaries (no Node.js required) are not yet available** — npm
+> is the supported installation channel. This page will list binaries, with
+> checksums and attestations, only once they actually ship.
+
+### Keep it current
+
+```bash
+furlpay update --check        # read-only check against npm
+furlpay update                # self-update (npm installs), with confirmation
+furlpay doctor                # install method, registry, config, connectivity
+```
+
+Updates are installation-method aware, transmit no credentials, never touch
+`~/.furlpay` (config, wallets, escrow ledger), and roll back with
+`npm install -g @furlpay/cli@<previous>`. See [docs/UPDATING.md](docs/UPDATING.md).
+
+---
+
 ## System Architecture
 
 ### 1. End-to-End System Architecture
@@ -394,6 +469,11 @@ furlpay bridge 100 --from eth --to arb
 furlpay invest buy AAPL 50
 furlpay travel search --city Tokyo --min-stars 4
 furlpay dashboard
+
+# CLI Management
+furlpay update --check        # check npm for a newer release (no changes)
+furlpay update                # self-update npm global installs (confirmed)
+furlpay doctor                # install, config, and connectivity diagnostics
 ```
 
 ---
@@ -417,6 +497,24 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 **Environment keys:** HLP/perp execution reads `HYPERLIQUID_PRIVATE_KEY` (or
 `ETH_PRIVATE_KEY`) from the environment — never from argv. Private keys and
 mnemonics for `wallet import` / `login --key` are accepted on stdin only.
+
+---
+
+## Distribution Security
+
+- npm installs are integrity-checked by npm (registry sha512 + signatures);
+  the package publishes with **npm provenance** (sigstore, OIDC-bound to this
+  repo and workflow).
+- GitHub Release assets (tarball, `checksums.txt`, CycloneDX SBOM) carry
+  **build-provenance attestations** — verify with
+  `gh attestation verify --repo FurlPay/furlpay-cli <file>`.
+- Release builds are gated on tag/version consistency, full typecheck +
+  tests, and a three-OS smoke install (CLI boot + MCP stdio handshake) of the
+  packed tarball before anything is published.
+- No postinstall scripts; no secrets in the package; CI actions are
+  SHA-pinned; the supply-chain posture is reviewed per release.
+
+See [docs/RELEASING.md](docs/RELEASING.md) and [docs/PACKAGING.md](docs/PACKAGING.md).
 
 ---
 
