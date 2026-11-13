@@ -26,6 +26,8 @@ import { HyperliquidClient } from "./hyperliquid/client";
 import { MarketDataService } from "./services/market-data";
 import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
+import { EscrowStore } from "./settlement/escrowStore";
+import { sanitizeTerminal } from "./tui/sanitize";
 import { Keypair } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -645,6 +647,8 @@ export class FurlPayStellarCli {
 
   private async handleEscrow(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
     const sub = subcommand || args[0] || "status";
+    const store = new EscrowStore();
+    const clean = (v: unknown): string => sanitizeTerminal(v) || "—";
 
     if (sub === "create") {
       const escrowId = `escrow_${crypto.randomBytes(6).toString("hex")}`;
@@ -653,30 +657,170 @@ export class FurlPayStellarCli {
       const amount = flags.amount || "1000.00";
       const token = flags.token || "USDC";
 
+      if (!(parseFloat(amount) > 0)) {
+        throw new Error("Escrow amount must be a positive number.");
+      }
+
+      // The delivery proof commitment is the SHA-256 hash of the agreed
+      // deliverable. Honor --proof-hash if the parties pre-agreed on one;
+      // otherwise generate a random commitment and say so.
+      const proofHash: string | undefined = flags["proof-hash"] || flags.proofHash;
+      if (proofHash && !/^0x[0-9a-fA-F]{64}$/.test(proofHash)) {
+        throw new Error("Invalid --proof-hash: must be a 0x-prefixed 32-byte hex SHA-256 hash.");
+      }
+      const deliverySpecHash = proofHash || "0x" + crypto.randomBytes(32).toString("hex");
+
+      const timeoutDays = flags["timeout-days"] || flags.timeoutDays
+        ? parseFloat(flags["timeout-days"] || flags.timeoutDays)
+        : 1;
+      if (!(timeoutDays > 0) || !isFinite(timeoutDays)) {
+        throw new Error("Invalid --timeout-days: must be a positive number.");
+      }
+
+      const arbiter = flags.arbiter ? String(flags.arbiter) : undefined;
       const terms: EscrowTerms = {
         escrowId,
         buyer,
         seller,
+        arbiter,
         amount,
         token,
         network: flags.network || "arbitrum",
-        expiryTimestamp: Math.floor(Date.now() / 1000) + 86400,
+        expiryTimestamp: Math.floor(Date.now() / 1000) + Math.round(timeoutDays * 86400),
         autoReleaseSeconds: 3600,
-        deliverySpecHash: "0x" + crypto.randomBytes(32).toString("hex"),
+        deliverySpecHash,
       };
 
       const sm = new EscrowStateMachine(terms);
+      store.save(sm);
       console.log(`[+] Escrow Agreement Created!`);
-      console.log(`    - Escrow ID:  ${terms.escrowId}`);
-      console.log(`    - Buyer:      ${terms.buyer}`);
-      console.log(`    - Seller:     ${terms.seller}`);
-      console.log(`    - Amount:     ${terms.amount} ${terms.token}`);
-      console.log(`    - Expiry:     24 hours (${new Date(terms.expiryTimestamp * 1000).toISOString()})`);
+      console.log(`    - Escrow ID:  ${clean(terms.escrowId)}`);
+      console.log(`    - Buyer:      ${clean(terms.buyer)}`);
+      console.log(`    - Seller:     ${clean(terms.seller)}`);
+      if (terms.arbiter) console.log(`    - Arbiter:    ${clean(terms.arbiter)}`);
+      console.log(`    - Amount:     ${clean(terms.amount)} ${clean(terms.token)}`);
+      console.log(`    - Network:    ${clean(terms.network)}`);
+      console.log(`    - Timeout:    ${timeoutDays} days (${new Date(terms.expiryTimestamp * 1000).toISOString()})`);
+      console.log(`    - Proof Hash: ${clean(terms.deliverySpecHash)}${proofHash ? "" : " (random commitment — pass --proof-hash to pin one)"}`);
+      console.log(`    - State:      ${sm.getState()}`);
+      console.log(`    - Persisted:  ${clean(store.path)}`);
+      console.log(`[i] Local escrow ledger (simulation) — no on-chain escrow contract was deployed.`);
+      return;
+    }
+
+    if (sub === "fund") {
+      const sm = store.loadMachine(flags["escrow-id"] || flags.escrowId || args[0]);
+      const txHash = flags["tx-hash"] || flags.txHash;
+      if (!txHash) {
+        throw new Error("Funding requires a real on-chain deposit. Pass --tx-hash <hash> referencing your funding transaction; this CLI will not fabricate one.");
+      }
+      // The local operator is the buyer of record (the party that locks collateral).
+      sm.fund(sm.getTerms().buyer, String(txHash));
+      store.save(sm);
+      console.log(`[✓] Escrow FUNDED (local ledger):`);
+      console.log(`    - Escrow ID:  ${clean(sm.getEscrowId())}`);
+      console.log(`    - Funding Tx: ${clean(String(txHash))}`);
+      console.log(`    - Amount:     ${clean(sm.getTerms().amount)} ${clean(sm.getTerms().token)}`);
       console.log(`    - State:      ${sm.getState()}`);
       return;
     }
 
+    if (sub === "proof" || sub === "submit-proof") {
+      const sm = store.loadMachine(flags["escrow-id"] || flags.escrowId || args[0]);
+      const proofHash = flags.hash || flags["proof-hash"] || flags.proofHash;
+      if (!proofHash || !/^0x[0-9a-fA-F]{64}$/.test(String(proofHash))) {
+        throw new Error("Invalid proof hash: pass --hash <0x-prefixed 32-byte hex SHA-256 of the delivered artifact>.");
+      }
+      const signature = flags.signature
+        ? String(flags.signature)
+        : `sim:local-cli-attestation:${Date.now()}`;
+      if (signature.startsWith("sim:")) {
+        console.log(`[!] No --signature provided — recording a local CLI attestation (simulation), not a cryptographic seller signature.`);
+      }
+      // The local operator acts as the seller of record when submitting delivery proof.
+      sm.submitProof(sm.getTerms().seller, {
+        proofHash: String(proofHash),
+        signature,
+        deliverableUri: flags.uri ? String(flags.uri) : undefined,
+        submittedAt: Math.floor(Date.now() / 1000),
+      });
+      store.save(sm);
+      console.log(`[✓] Delivery Proof Submitted (local ledger):`);
+      console.log(`    - Escrow ID:  ${clean(sm.getEscrowId())}`);
+      console.log(`    - Proof Hash: ${clean(proofHash)}`);
+      console.log(`    - State:      ${sm.getState()}`);
+      const terms = sm.getTerms();
+      console.log(`    - Auto-release in ${terms.autoReleaseSeconds}s unless the buyer intervenes.`);
+      return;
+    }
+
+    if (sub === "release") {
+      const sm = store.loadMachine(flags["escrow-id"] || flags.escrowId || args[0]);
+      const txHash = flags["tx-hash"] || flags.txHash;
+      if (!txHash) {
+        throw new Error("Releasing escrow funds requires a real settlement transaction. Pass --tx-hash <hash>; this CLI will not fabricate one.");
+      }
+      // The local operator is the buyer of record (or auto-release timer applies).
+      sm.release(sm.getTerms().buyer, String(txHash));
+      store.save(sm);
+      console.log(`[✓] Escrow RELEASED to seller (local ledger):`);
+      console.log(`    - Escrow ID:    ${clean(sm.getEscrowId())}`);
+      console.log(`    - Settlement Tx: ${clean(String(txHash))}`);
+      console.log(`    - State:        ${sm.getState()}`);
+      return;
+    }
+
+    if (sub === "dispute") {
+      const sm = store.loadMachine(flags["escrow-id"] || flags.escrowId || args[0]);
+      const reason = flags.reason || flags.r;
+      if (!reason) {
+        throw new Error("A dispute requires a reason. Pass --reason <message>.");
+      }
+      const safeReason = sanitizeTerminal(reason).slice(0, 500);
+      // The local operator is a counterparty of record.
+      sm.dispute(sm.getTerms().buyer, safeReason);
+      store.save(sm);
+      console.log(`[!] Escrow DISPUTED (local ledger):`);
+      console.log(`    - Escrow ID:  ${clean(sm.getEscrowId())}`);
+      console.log(`    - Reason:     ${clean(safeReason)}`);
+      console.log(`    - State:      ${sm.getState()}`);
+      console.log(`[i] Await arbiter resolution (furlpay escrow release after arbitration, or refund).`);
+      return;
+    }
+
+    if (sub === "status" || sub === "list") {
+      const escrows = store.list();
+      if (!escrows.length) {
+        console.log(`No escrows found in the local ledger (${clean(store.path)}).`);
+        console.log(`Create one with: furlpay escrow create --amount 1000 --seller <address>`);
+        return;
+      }
+      const targetId = flags["escrow-id"] || flags.escrowId;
+      const shown = targetId
+        ? escrows.filter((s) => s.terms.escrowId === String(targetId))
+        : escrows;
+      if (targetId && !shown.length) {
+        throw new Error(`Escrow '${sanitizeTerminal(targetId)}' not found in the local ledger.`);
+      }
+      console.log(`Escrow Ledger (${shown.length}) — local store, not on-chain:`);
+      for (const snap of shown) {
+        console.log(`  ${clean(snap.terms.escrowId)} | ${snap.state} | ${clean(snap.terms.amount)} ${clean(snap.terms.token)} | expires ${new Date(snap.terms.expiryTimestamp * 1000).toISOString()}`);
+        if (flags.verbose || flags.v) {
+          for (const rec of snap.auditLog) {
+            console.log(`      ${new Date(rec.timestamp * 1000).toISOString()} ${rec.fromState} -> ${rec.toState} (${clean(rec.actor)})${rec.reason ? `: ${clean(rec.reason)}` : ""}`);
+          }
+        }
+      }
+      return;
+    }
+
     console.log("Usage: furlpay escrow <create|fund|proof|release|dispute|status> [options]");
+    console.log("  create  --amount <usd> --seller <addr> [--buyer <addr>] [--arbiter <addr>] [--timeout-days 7] [--proof-hash 0x...]");
+    console.log("  fund    --escrow-id <id> --tx-hash <funding tx>          (requires a real deposit transaction)");
+    console.log("  proof   --escrow-id <id> --hash 0x<sha256> [--signature <sig>] [--uri <deliverable>]");
+    console.log("  release --escrow-id <id> --tx-hash <settlement tx>       (requires a real settlement transaction)");
+    console.log("  dispute --escrow-id <id> --reason <message>");
+    console.log("  status  [--escrow-id <id>] [--verbose]");
   }
 
   private async handleEarn(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
@@ -684,33 +828,48 @@ export class FurlPayStellarCli {
 
     if (sub === "hlp" || args[0] === "hlp" || !sub) {
       const action = args[0] === "hlp" ? args[1] : args[0];
+      const fmtMoney = (v: number | null): string =>
+        v === null ? "unavailable (live vault data did not include it)" : `$${v.toLocaleString("en-US")} USDC`;
 
       if (action === "deposit") {
         const amt = flags.amount ? parseFloat(flags.amount) : parseFloat(args[2] || "500");
         const res = await this.hlp.deposit(amt);
         console.log(`[✓] HLP Deposit Confirmed!`);
         console.log(`    - Deposited:     \$${res.amountDepositedUsd.toFixed(2)} USDC`);
-        console.log(`    - Shares:        ${res.sharesMinted} HLP`);
-        console.log(`    - Effective NAV: \$${res.effectiveSharePrice.toFixed(4)} USD`);
-        console.log(`    - Trailing APY:  ${res.currentApyPct}% Real APR`);
+        console.log(`    - Shares:        ${res.sharesMinted === null ? "n/a (determined by the exchange at settlement)" : `${res.sharesMinted} HLP`}`);
+        console.log(`    - Effective NAV: ${res.effectiveSharePrice === null ? "n/a (live share price not published)" : `\$${res.effectiveSharePrice.toFixed(4)} USD`}`);
+        console.log(`    - Trailing APY:  ${res.currentApyPct === null ? "unavailable" : `${res.currentApyPct}% Real APR`}`);
         console.log(`    - Lockup Expiry: ${res.lockupExpiry} (4-day withdrawal hold)`);
-        console.log(`    - Tx Hash:       ${res.txHash}`);
+        console.log(`    - Tx Hash:       ${sanitizeTerminal(res.txHash)}`);
+        return;
+      }
+
+      if (action === "withdraw") {
+        const amt = flags.amount ? parseFloat(flags.amount) : parseFloat(args[2] || "0");
+        if (!(amt > 0)) {
+          throw new Error("HLP withdrawal requires a positive amount: furlpay earn hlp withdraw --amount <usd>");
+        }
+        const res = await this.hlp.withdraw(amt);
+        console.log(`[✓] HLP Withdrawal Submitted!`);
+        console.log(`    - Requested:     \$${res.usdReceived.toFixed(2)} USDC`);
+        console.log(`    - Tx Hash:       ${sanitizeTerminal(res.txHash)}`);
+        console.log(`[i] Hyperliquid enforces a mandatory 4-day withdrawal lockup on HLP capital.`);
         return;
       }
 
       const stats = await this.hlp.getHlpStats();
       console.log(`Hyperliquid Liquidity Provider (HLP) Clearinghouse Vault:`);
       console.log(`  - Vault Address: ${stats.vaultAddress}`);
-      console.log(`  - Total Equity:  \$${(stats.totalEquityUsd / 1_000_000).toFixed(1)}M USDC`);
-      console.log(`  - Share Price:   \$${stats.sharePriceUsd.toFixed(4)} USD`);
-      console.log(`  - Trailing APY:  ${stats.trailing30dApyPct}% Real APR`);
-      console.log(`  - All-Time PnL:  +\$${(stats.allTimePnlUsd / 1_000_000).toFixed(1)}M USD`);
+      console.log(`  - Total Equity:  ${fmtMoney(stats.totalEquityUsd)}`);
+      console.log(`  - Share Price:   ${stats.sharePriceUsd === null ? "unavailable (live share price not published)" : `\$${stats.sharePriceUsd.toFixed(4)} USD`}`);
+      console.log(`  - Trailing APY:  ${stats.trailing30dApyPct === null ? "unavailable" : `${stats.trailing30dApyPct}% Real APR`}`);
+      console.log(`  - All-Time PnL:  ${stats.allTimePnlUsd === null ? "unavailable" : `+\$${(stats.allTimePnlUsd / 1_000_000).toFixed(1)}M USD`}`);
       console.log(`  - Lockup Period: 4 days (345,600s mandatory deposit cooldown)`);
-      console.log(`  - Deposits:      ${stats.rawVault.allowDeposits ? "OPEN" : "PAUSED"}`);
+      console.log(`  - Deposits:      ${stats.rawVault && stats.rawVault.allowDeposits ? "OPEN" : "UNKNOWN/PAUSED"}`);
       return;
     }
 
-    console.log("Usage: furlpay earn hlp [deposit|stats] [--amount <usd>]");
+    console.log("Usage: furlpay earn hlp [deposit|withdraw|stats] [--amount <usd>]");
   }
 
   private async handleOrder(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {

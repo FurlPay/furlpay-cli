@@ -382,9 +382,13 @@ export class McpStdioServer {
             status: "SUCCESS",
             vault: "HYPERLIQUID_HLP",
             amount_usd: amt,
+            // null = not derivable from public vault data; the exchange
+            // determines actual shares and NAV at settlement.
             shares_minted: res.sharesMinted,
             share_price: res.effectiveSharePrice,
-            apy: `${res.currentApyPct}% Real APR`,
+            apy: res.currentApyPct === null
+              ? "unavailable (vault APR not returned by live data)"
+              : `${res.currentApyPct}% Real APR`,
             tx_hash: res.txHash,
           };
         } else {

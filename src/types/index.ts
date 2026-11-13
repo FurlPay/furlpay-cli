@@ -174,13 +174,18 @@ export interface SignerInterface {
 
 export interface HlpVaultInfo {
   vaultAddress: string;
-  totalEquityUsd: number;
-  sharePriceUsd: number;
+  /** Live vault equity derived from portfolio account-value history; null when the validator returned no history. */
+  totalEquityUsd: number | null;
+  /** Not derivable from public vaultDetails — null unless a live source publishes it. Never a fabricated NAV. */
+  sharePriceUsd: number | null;
   aprFraction?: number;
   aprPercent?: number;
-  trailing30dApyPct: number;
-  allTimePnlUsd: number;
-  activePositionsCount: number;
+  /** Live trailing APY from the vault's reported APR; null when the API returned none. */
+  trailing30dApyPct: number | null;
+  /** Live all-time PnL derived from portfolio pnl history; null when unavailable. */
+  allTimePnlUsd: number | null;
+  /** Not reported by public vaultDetails — always null. */
+  activePositionsCount: number | null;
   lockingPeriodSeconds?: number;
   lockupNotice?: string;
 }
@@ -189,9 +194,10 @@ export interface HlpDepositResult {
   status: "CONFIRMED";
   txHash: string;
   amountDepositedUsd: number;
-  sharesMinted: number;
-  effectiveSharePrice: number;
-  currentApyPct: number;
+  /** Shares are computed by the exchange at settlement; null when no live share price is available. */
+  sharesMinted: number | null;
+  effectiveSharePrice: number | null;
+  currentApyPct: number | null;
   venue: "HYPERLIQUID_L1";
 }
 

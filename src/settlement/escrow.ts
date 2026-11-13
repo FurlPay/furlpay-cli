@@ -236,4 +236,61 @@ export class EscrowStateMachine {
     this.settlementTxHash = refundTxHash;
     this.recordTransition("REFUNDED", actor, "Escrow collateral refunded back to buyer", refundTxHash);
   }
+
+  /**
+   * Persist the full machine state (terms + lifecycle position + audit log)
+   * so the escrow survives across CLI invocations.
+   */
+  serialize(): EscrowSnapshot {
+    return {
+      schema: "furlpay-escrow-v1",
+      terms: { ...this.terms },
+      state: this.state,
+      deliveryProof: this.deliveryProof ? { ...this.deliveryProof } : undefined,
+      fundingTxHash: this.fundingTxHash,
+      settlementTxHash: this.settlementTxHash,
+      auditLog: this.auditLog.map((r) => ({ ...r })),
+    };
+  }
+
+  /**
+   * Rebuild a machine from a snapshot. The audit log is restored verbatim so
+   * transitions remain immutable across process boundaries; the constructor
+   * invariants are re-validated on the persisted terms.
+   */
+  static deserialize(snapshot: EscrowSnapshot): EscrowStateMachine {
+    if (!snapshot || snapshot.schema !== "furlpay-escrow-v1") {
+      throw new Error("Invalid escrow snapshot: unrecognized or missing schema.");
+    }
+    if (!snapshot.terms || typeof snapshot.terms !== "object") {
+      throw new Error("Invalid escrow snapshot: terms are required.");
+    }
+    const validStates: EscrowState[] = [
+      "CREATED", "FUNDED", "DELIVERY_PENDING", "PROOF_SUBMITTED",
+      "RELEASED", "DISPUTED", "REFUND_PENDING", "REFUNDED",
+    ];
+    if (!validStates.includes(snapshot.state)) {
+      throw new Error(`Invalid escrow snapshot: unknown state '${snapshot.state}'.`);
+    }
+
+    const machine = new EscrowStateMachine({ ...snapshot.terms });
+    (machine as any).state = snapshot.state;
+    machine.auditLog = Array.isArray(snapshot.auditLog)
+      ? snapshot.auditLog.map((r) => ({ ...r }))
+      : [];
+    if (snapshot.deliveryProof) machine.deliveryProof = { ...snapshot.deliveryProof };
+    if (snapshot.fundingTxHash) machine.fundingTxHash = snapshot.fundingTxHash;
+    if (snapshot.settlementTxHash) machine.settlementTxHash = snapshot.settlementTxHash;
+    return machine;
+  }
+}
+
+export interface EscrowSnapshot {
+  schema: "furlpay-escrow-v1";
+  terms: EscrowTerms;
+  state: EscrowState;
+  deliveryProof?: DeliveryProof;
+  fundingTxHash?: string;
+  settlementTxHash?: string;
+  auditLog: EscrowTransitionRecord[];
 }

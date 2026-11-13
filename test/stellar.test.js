@@ -296,7 +296,9 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
 
   // Call furlpay_get_hlp_yield
   const hlpStats = await mcp.handleCall("furlpay_get_hlp_yield", {});
-  assert.ok(hlpStats.trailing30dApyPct >= 0);
+  assert.ok(hlpStats.trailing30dApyPct === null || hlpStats.trailing30dApyPct >= 0,
+    "APY is live-derived or explicitly null — never a fabricated benchmark");
+  assert.ok(hlpStats.sharePriceUsd === null, "share price must not be fabricated (exchange-determined)");
   assert.ok(hlpStats.vaultAddress.startsWith("0x"));
 
   // Call furlpay_balance
@@ -310,8 +312,16 @@ test("FurlPay Hyperliquid: L1 Perpetuals & HLP Clearinghouse Vault", async () =>
 
   const hlp = new HlpVaultService();
   const stats = await hlp.getHlpStats();
-  assert.ok(stats.totalEquityUsd > 100_000_000);
-  assert.ok(stats.trailing30dApyPct > 0);
+  // P1 #7: figures derive from the live vaultDetails payload or are null —
+  // the old 850M equity / 28.5% APY / 1.4285 NAV fallbacks must stay gone.
+  if (stats.totalEquityUsd !== null) {
+    assert.ok(stats.totalEquityUsd > 100_000_000, "live HLP equity > $100M");
+  }
+  if (stats.trailing30dApyPct !== null) {
+    assert.ok(stats.trailing30dApyPct > 0, "live HLP APY > 0 (sign preserved)");
+  }
+  assert.strictEqual(stats.sharePriceUsd, null);
+  assert.strictEqual(stats.activePositionsCount, null);
 
   // SEC-FAIL-CLOSED: Unauthenticated HLP deposit must strictly reject without a configured signer
   await assert.rejects(

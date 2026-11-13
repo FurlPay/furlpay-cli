@@ -149,8 +149,8 @@ sequenceDiagram
     MCP->>Trust: Validate Policy (OFAC/SDN check, singleTxCap, dailyVelocity)
     Trust-->>MCP: Policy Approved (Clean sanctions score, budget available)
     MCP->>TB: Internal Netting Ledger Transfer (<$0.0001 cost, <1ms)
-    TB-->>MCP: Settle Tx furlpay_net_991823
-    MCP-->>Agent: { status: "SETTLED", authHeader: "Authorization: x402 ..." }
+    TB-->>MCP: Simulated settlement furlpay_simnet_* (no live TigerBeetle in this build)
+    MCP-->>Agent: { status: "SIMULATED", settlementType: "LOCAL_SIMULATION", authHeader: "Authorization: x402 ..." }
 
     Note over Agent,MCP: Automated Idle Treasury Yield Sweeping
     Agent->>MCP: tools/call: furlpay_sweep_treasury { amountUsd: 450.00 }
@@ -253,7 +253,9 @@ furlpay rwa kyc --asset FOBXX --interactive
 ### 5. HTTP 402 Micropayments (`furlpay x402`)
 
 ```bash
-# Settle an HTTP 402 payment challenge via TigerBeetle sub-ledger (<$0.0001 cost)
+# Settle an HTTP 402 payment challenge.
+# NOTE: the engine has no live TigerBeetle connection in this build — settlement
+# runs as a clearly-labeled local simulation (status: SIMULATED, LOCAL_SIMULATION).
 furlpay x402 pay \
   --challenge-header 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"' \
   --max-cost 0.005
@@ -285,17 +287,33 @@ furlpay account positions
 furlpay trading limits --max-single-order 50000 --max-leverage 20
 furlpay trading kill-switch --symbol BTC
 
-# Inspect and deposit into HLP clearinghouse vault (with 4-day lockup notification)
+# Inspect, deposit into, and withdraw from the HLP clearinghouse vault
+# (4-day lockup notification on deposits and withdrawals)
 furlpay earn hlp stats
 furlpay earn hlp deposit 1000
+furlpay earn hlp withdraw 100
+
+# Deposits/withdrawals require a funded signer — the CLI fails closed without one:
+export HYPERLIQUID_PRIVATE_KEY=0x...   # or ETH_PRIVATE_KEY
 ```
+
+> **Data provenance:** `earn hlp stats` derives equity, APY, and all-time PnL
+> from the live Hyperliquid `/info` vault response. Fields the public API does
+> not report (share price, open position count) are shown as *unavailable* —
+> never fabricated benchmarks. Withdrawals/deposits are real signed L1
+> `vaultTransfer` actions and strictly require a configured signer.
 
 ---
 
 ### 7. Escrow & Time-Locked Settlement Scheme (`furlpay escrow`)
 
+A deterministic escrow state machine
+(`CREATED → FUNDED → PROOF_SUBMITTED → RELEASED`, with `DISPUTED` and
+refund paths) persisted across invocations in a durable local ledger at
+`~/.furlpay/escrows.json` (atomic writes, 0600 on POSIX, symlink refusal).
+
 ```bash
-# Create deterministic cryptographic delivery escrow with SHA-256 proof hash
+# Create an escrow with a pre-agreed SHA-256 delivery proof commitment
 furlpay escrow create \
   --seller 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --arbiter 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
@@ -303,12 +321,26 @@ furlpay escrow create \
   --timeout-days 7 \
   --proof-hash 0x2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
 
-# Fund escrow
-furlpay escrow fund --id escrow_1710000000000
+# Fund (requires the real funding transaction hash — the CLI never fabricates one)
+furlpay escrow fund --escrow-id escrow_1710000000000 --tx-hash 0x<your funding tx>
 
-# Submit delivery proof and release funds
-furlpay escrow release --id escrow_1710000000000 --preimage "invoice_fulfillment_secret_123"
+# Seller submits the cryptographic delivery proof (SHA-256 of the deliverable)
+furlpay escrow proof --escrow-id escrow_1710000000000 --hash 0x<sha256> --signature <sig>
+
+# Release funds to the seller (buyer approval; auto-release timer also supported)
+furlpay escrow release --escrow-id escrow_1710000000000 --tx-hash 0x<settlement tx>
+
+# Open a dispute for arbiter resolution
+furlpay escrow dispute --escrow-id escrow_1710000000000 --reason "delivery did not match spec"
+
+# Inspect the ledger (add --verbose for the immutable transition audit log)
+furlpay escrow status [--escrow-id escrow_1710000000000] [--verbose]
 ```
+
+> **Honesty label:** this is a *local* escrow ledger (state machine + audit
+> log on disk) — no on-chain escrow contract is deployed and no funds move
+> except the transactions you reference via `--tx-hash`. Unauthorized actors,
+> malformed proof hashes, and tx-hash-less fund/release attempts fail closed.
 
 ---
 
@@ -334,12 +366,12 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 ```
 
 ### Exposed MCP Tools:
-- `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps).
-- `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban or Hyperliquid HLP.
+- `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps). Responses are explicitly labeled `SIMULATED` / `LOCAL_SIMULATION` in this build.
+- `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban (labeled simulated) or Hyperliquid HLP (real signed vault transfer).
 - `furlpay_trade`: Execute limit orders, path payments, or AMM swaps with delegated budget enforcement on Stellar.
 - `furlpay_trade_perp`: Execute perpetual futures orders on Hyperliquid L1 (BTC-PERP, ETH-PERP, NVDA-PERP, HYPE-PERP).
-- `furlpay_get_hlp_yield`: Query live performance, share price, and 30-day trailing APY for Hyperliquid HLP vault.
-- `furlpay_balance`: Query balances across Stellar native assets, USDC, and tokenized RWAs.
+- `furlpay_get_hlp_yield`: Query live HLP vault performance — equity/APY/PnL derived from the live `/info` response; unreported fields (share price, position count) are returned as `null` rather than fabricated.
+- `furlpay_balance`: Query balances across Stellar native assets, USDC, and tokenized RWAs (labeled simulated sample data in unauthenticated mode).
 - `furlpay_get_quote`: Retrieve optimal multi-hop quotes across SDEX and Soroban AMMs.
 
 ---
@@ -348,7 +380,7 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 
 ```bash
 # Session & Account
-furlpay login               # email OTP login
+furlpay login               # email OTP login (--device for RFC 8628 browser flow)
 furlpay whoami              # active session and Safe address
 furlpay balance             # token balances across Arbitrum, Base, Optimism, Ethereum
 
@@ -363,6 +395,28 @@ furlpay invest buy AAPL 50
 furlpay travel search --city Tokyo --min-stars 4
 furlpay dashboard
 ```
+
+---
+
+## What Is Live vs. Simulated (Honesty Matrix)
+
+Every execution surface in this CLI is labeled at runtime. Summary:
+
+| Surface | Status | Notes |
+|---|---|---|
+| Hyperliquid market data (`market`, `hyperliquid markets/status`) | **LIVE** | Real `/info` responses from Hyperliquid validators |
+| HLP vault stats (`earn hlp stats`) | **LIVE** | Equity/APY/PnL derived from live `vaultDetails`; unreported fields → `unavailable`, never fabricated |
+| HLP deposit / withdraw | **LIVE** (signed) | Real EIP-712 `vaultTransfer` actions; fail closed without `HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY` |
+| Hyperliquid perp execution (`hyperliquid trade`) | **LIVE** (signed) | Requires configured signer; pre-trade risk engine enforced |
+| Escrow (`furlpay escrow`) | **LOCAL LEDGER** | Deterministic state machine + audit log at `~/.furlpay/escrows.json`; fund/release require real `--tx-hash` (never fabricated); no on-chain contract is deployed |
+| x402 settlement (`x402 pay`, MCP `furlpay_settle_invoice`) | **SIMULATED** | No live TigerBeetle facilitator in this build; responses say `SIMULATED` / `LOCAL_SIMULATION` |
+| Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build |
+| MCP `furlpay_balance` (unauthenticated mode) | **SIMULATED** | Sample fixture balances, flagged `simulated: true` |
+| FOBXX sweep (`furlpay_sweep_treasury` target FOBXX) | **SIMULATED** | No Stellar Benji contract call in this build |
+
+**Environment keys:** HLP/perp execution reads `HYPERLIQUID_PRIVATE_KEY` (or
+`ETH_PRIVATE_KEY`) from the environment — never from argv. Private keys and
+mnemonics for `wallet import` / `login --key` are accepted on stdin only.
 
 ---
 

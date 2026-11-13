@@ -237,7 +237,12 @@ describe("Hyperliquid Execution & Microstructure Verification", () => {
     const stats = await hlp.getHlpStats();
 
     assert.strictEqual(stats.vaultAddress, "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303");
-    assert.ok(stats.totalEquityUsd > 100_000_000, "HLP vault equity > $100M");
+    // P1 #7: equity is live-derived or null — the 850M fabricated fallback is gone.
+    if (stats.totalEquityUsd !== null) {
+      assert.ok(stats.totalEquityUsd > 100_000_000, "HLP vault equity > $100M when live data is present");
+    }
+    assert.strictEqual(stats.sharePriceUsd, null, "share price must not be fabricated");
+    assert.strictEqual(stats.activePositionsCount, null, "position count must not be fabricated");
     assert.ok(stats.rawVault.allowDeposits === true, "Vault allows deposits");
 
     // APR vs APY Provenance & Protocol Lockup Invariant

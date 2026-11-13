@@ -41,39 +41,58 @@ export class HlpVaultService {
 
   /**
    * Query real-time metrics for the community HLP liquidity vault from Hyperliquid validators.
+   *
+   * Data provenance (2026-11-12 audit P1 #7): every figure is derived from the
+   * live /info response or reported as null. No benchmark/benchmark fallbacks —
+   * a fabricated equity, APY, share price, or PnL previously shipped here.
    */
   async getHlpStats(userAddress?: string): Promise<HlpVaultInfo & { rawVault: HyperliquidVaultDetails }> {
     const vault = await this.client.getVaultDetails(this.vaultAddress, userAddress);
 
-    // Compute approximate equity & APY from portfolio performance data
-    let totalEquityUsd = 850_000_000.0;
-    let trailingApyPct = Math.abs(vault.apr * 100);
-    if (trailingApyPct === 0 || isNaN(trailingApyPct)) {
-      trailingApyPct = 28.5; // Benchmark trailing APR
-    }
+    // Live equity: latest account value from the vault portfolio history.
+    let totalEquityUsd: number | null = null;
+    // Live all-time PnL: latest cumulative PnL point from the portfolio history.
+    let allTimePnlUsd: number | null = null;
 
     if (vault.portfolio && Array.isArray(vault.portfolio)) {
-      const daySlice = vault.portfolio.find((p: any) => p[0] === "day" || p[0] === "month");
-      if (daySlice && daySlice[1]?.accountValueHistory?.length) {
-        const hist = daySlice[1].accountValueHistory;
-        const latestEquity = parseFloat(hist[hist.length - 1][1]);
-        if (latestEquity > 0) totalEquityUsd = latestEquity;
+      for (const period of ["allTime", "month", "day"] as const) {
+        const slice = vault.portfolio.find((p: any) => p[0] === period);
+        if (!slice || !slice[1]) continue;
+        if (totalEquityUsd === null && Array.isArray(slice[1].accountValueHistory) && slice[1].accountValueHistory.length) {
+          const hist = slice[1].accountValueHistory;
+          const latest = parseFloat(hist[hist.length - 1][1]);
+          if (isFinite(latest) && latest > 0) totalEquityUsd = latest;
+        }
+        if (allTimePnlUsd === null && period === "allTime" && Array.isArray(slice[1].pnlHistory) && slice[1].pnlHistory.length) {
+          const pnlHist = slice[1].pnlHistory;
+          const latestPnl = parseFloat(pnlHist[pnlHist.length - 1][1]);
+          if (isFinite(latestPnl)) allTimePnlUsd = latestPnl;
+        }
+        if (totalEquityUsd !== null) break;
       }
     }
 
-    const rawApr = vault.apr ?? 0;
-    const aprFraction = Number(rawApr.toFixed(6));
-    const aprPercent = Number((rawApr * 100).toFixed(4));
+    // Live APY: only from the vault's own reported APR. The previous 28.5%
+    // "benchmark" fallback fabricated performance data and was removed.
+    const rawApr = typeof vault.apr === "number" && isFinite(vault.apr) ? vault.apr : null;
+    const aprFraction = rawApr === null ? undefined : Number(rawApr.toFixed(6));
+    const aprPercent = rawApr === null ? undefined : Number((rawApr * 100).toFixed(4));
+    const trailingApyPct: number | null = rawApr === null ? null : Number((rawApr * 100).toFixed(2));
 
     return {
       vaultAddress: this.vaultAddress,
-      totalEquityUsd: Number(totalEquityUsd.toFixed(2)),
-      sharePriceUsd: 1.4285, // Standard normalized NAV per share
+      totalEquityUsd: totalEquityUsd === null ? null : Number(totalEquityUsd.toFixed(2)),
+      // Share price (NAV/share) is not part of the public vaultDetails payload.
+      // The old hardcoded 1.4285 was removed — callers must treat it as
+      // exchange-determined instead of a made-up normalized value.
+      sharePriceUsd: null,
       aprFraction,
       aprPercent,
-      trailing30dApyPct: Number(trailingApyPct.toFixed(2)),
-      allTimePnlUsd: 312_400_000.0,
-      activePositionsCount: 142,
+      trailing30dApyPct: trailingApyPct,
+      allTimePnlUsd: allTimePnlUsd === null ? null : Number(allTimePnlUsd.toFixed(2)),
+      // Open position count is not reported by public vaultDetails; the old
+      // hardcoded 142 was removed.
+      activePositionsCount: null,
       lockingPeriodSeconds: 345_600, // 4-day protocol lockup
       lockupNotice: "Mandatory 4-day (345,600s) withdrawal lockup enforced by Hyperliquid L1 protocol.",
       rawVault: vault,
@@ -98,7 +117,11 @@ export class HlpVaultService {
     }
 
     const stats = await this.getHlpStats(activeSigner.getAddress());
-    const sharesMinted = Number((amountUsd / stats.sharePriceUsd).toFixed(6));
+    // The exchange computes actual minted shares at settlement; a client-side
+    // estimate is only shown when a live share price is genuinely available.
+    const sharesMinted = stats.sharePriceUsd === null
+      ? null
+      : Number((amountUsd / stats.sharePriceUsd).toFixed(6));
 
     const action = {
       type: "vaultTransfer",
