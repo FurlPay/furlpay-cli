@@ -217,6 +217,11 @@ async function main() {
     case "microstructure":
       return require("../lib/microstructureCommands").run({ subcommand: args[0], args: args.slice(1), flags });
 
+    // ---- Bitcoin shorting (mechanism registry + signal-gated readiness) ----
+    case "short":
+    case "shorting":
+      return require("../lib/shortCommands").run({ subcommand: args[0], args: args.slice(1), flags });
+
     // ---- fork asset operations (Phase 1: read-only intelligence + safety) --
     case "fork":
       return require("../lib/forkCommands").run({ subcommand: args[0], args: args.slice(1), flags });

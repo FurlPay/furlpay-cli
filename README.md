@@ -489,8 +489,6 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 - `microstructure_analytics`: exponentially-weighted OBI + Stoikov microprice over a supplied depth snapshot (integer-minor).
 - `microstructure_vpin`: Easley/López de Prado/O'Hara order-flow toxicity over a supplied trade tape (fixed-volume buckets, trailing partial excluded per the model).
 - `microstructure_quotes`: Avellaneda-Stoikov reservation price + optimal bid/ask for an inventory position.
-- : Easley/López de Prado/O'Hara order-flow toxicity over a supplied trade tape (fixed-volume buckets, trailing partial excluded).
-- : Avellaneda-Stoikov reservation price + optimal bid/ask for an inventory position.
 - `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps). Responses are explicitly labeled `SIMULATED` / `LOCAL_SIMULATION` in this build.
 - `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban (labeled simulated) or Hyperliquid HLP (real signed vault transfer).
 - `furlpay_trade`: Execute limit orders, path payments, or AMM swaps with delegated budget enforcement on Stellar.
@@ -529,7 +527,45 @@ furlpay doctor                # install, config, and connectivity diagnostics
 ---
 
 
-## Binance Exchange Integration (branch `feat/binance-integration` — TESTNET-READY, live verification BLOCKED on credentials)
+## Bitcoin Shorting (Hyperliquid rail — LIVE; `furlpay short`)
+
+**Shorting BTC is supported and live** on the Hyperliquid rail: a short is a
+signed EIP-712 order with side `sell` through the exchange endpoint, behind
+the pre-trade risk engine, mandate gate and kill-switch.
+
+```bash
+# Open a short (LIVE, signed, risk-engine enforced)
+furlpay hyperliquid trade --symbol BTC --side sell --size 0.05 --leverage 5
+
+# Close the short (market buy-back of the position size)
+furlpay account positions
+furlpay hyperliquid close BTC
+```
+
+`furlpay short` adds the short-specific intelligence from the quantitative
+microstructure research:
+
+```bash
+# Which mechanisms exist (honest status per venue)
+furlpay short mechanisms
+
+# Short-READINESS research: OBI ask-wall + microprice-below-mid + VPIN
+# non-toxic flow, evaluated over YOUR supplied data (read-only analysis —
+# never an execution trigger; the risk engine gates every real order)
+furlpay short signal --book depth.json --tape trades.json --bucket 1000
+```
+
+| Mechanism | Status |
+|---|---|
+| Hyperliquid perpetual short (`--side sell`) | **LIVE** (signed, risk-engine enforced) |
+| Binance USD-M futures short | **NOT IMPLEMENTED** (futures declared `false` in the capability registry) |
+| CME cash-settled futures / basis trade | **N/A** (no institutional venue access) |
+
+The signal gate combines the three entry-criteria signals from the shorting
+literature: ask-wall OBI (≤ −0.65), microprice drifted below mid, and
+**non-toxic** VPIN flow (shorting into an informed dump is squeeze risk).
+
+## Binance Exchange Integration (TESTNET-READY, live verification BLOCKED on credentials)
 
 A first-class Binance adapter built on the same architecture as the Hyperliquid
 engine, behind the same Agent Trust controls.
@@ -571,6 +607,7 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | HLP deposit / withdraw | **LIVE** (signed) | Real EIP-712 `vaultTransfer` actions; fail closed without `HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY` |
 | Hyperliquid perp execution (`hyperliquid trade`) | **LIVE** (signed) | Requires configured signer; pre-trade risk engine enforced |
 | Escrow (`furlpay escrow`) | **LOCAL LEDGER** | Deterministic state machine + audit log at `~/.furlpay/escrows.json`; fund/release require real `--tx-hash` (never fabricated); no on-chain contract is deployed |
+| Bitcoin shorting (`furlpay short mechanisms/signal`, execution `hyperliquid trade --side sell`) | **LIVE** (execution) / **ANALYSIS** (signals) | Short execution is the same signed EIP-712 sell order path as any Hyperliquid order — LIVE with the risk engine enforced. `furlpay short signal` is read-only OBI/microprice/VPIN research over supplied data: analysis, never an execution trigger. Binance futures shorts NOT IMPLEMENTED. |
 | Binance spot adapter (signed requests, balances, orders) | **IMPLEMENTED, TESTNET-BLOCKED** | Full unit battery against stubbed transport (14 tests: signing determinism, secret redaction, env separation, error surfacing, gate ordering); live/testnet end-to-end requires API credentials with withdrawals disabled. Exchange errors surface code+message+HTTP status — never a synthetic success. |
 | Sweep artifact utilities (`fork simulate/psbt-inspect/opreturn/taint-plan`) | **IMPLEMENTED (Phase 2, offline)** | Slippage simulator over a *supplied* depth snapshot (integer minor math, deterministic, depth+cap refusals); BIP-174 PSBT wire inspector; BTC1 OP_RETURN barrier builder (≥83B enforced, PUSHDATA2); BTCB2 per-output taint plans. All artifacts are review-only — never broadcast. Live venue data: NOT IMPLEMENTED (no venue adapter). |
 | Market microstructure analytics (`microstructure analytics/vpin/quotes`) | **IMPLEMENTED (offline)** | Exponentially-weighted OBI, Stoikov microprice, Easley-VPIN, Avellaneda-Stoikov reservation quotes — the four canonical HFT indicators, pure math over a *supplied* depth snapshot or trade tape. No live feed in this build; the WebSocket engine feeds these same functions when it ships. Formulas: Easley/López de Prado/O'Hara (VPIN), Stoikov (micro-price), Avellaneda-Stoikov (reservation). |
