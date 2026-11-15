@@ -480,7 +480,15 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 }
 ```
 
-### Exposed MCP Tools:
+### Exposed MCP Tools (25 total — read-only research + policy-gated execution):
+
+**Fork asset operations (read-only):**
+-  /  / : declared fork registry and offline replay-risk audits (BTCB2, BTC1, ECX).
+
+**Market microstructure (read-only quant research):**
+- : exponentially-weighted OBI + Stoikov microprice over a supplied depth snapshot (integer-minor).
+- : Easley/López de Prado/O'Hara order-flow toxicity over a supplied trade tape (fixed-volume buckets, trailing partial excluded).
+- : Avellaneda-Stoikov reservation price + optimal bid/ask for an inventory position.
 - `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps). Responses are explicitly labeled `SIMULATED` / `LOCAL_SIMULATION` in this build.
 - `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban (labeled simulated) or Hyperliquid HLP (real signed vault transfer).
 - `furlpay_trade`: Execute limit orders, path payments, or AMM swaps with delegated budget enforcement on Stellar.
