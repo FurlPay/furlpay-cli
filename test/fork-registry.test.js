@@ -79,7 +79,7 @@ test("every audit result carries the honesty disclaimer — no on-chain claims",
 });
 
 test("CLI: phase-3 surfaces refuse with NOT_IMPLEMENTED and exit 1", () => {
-  for (const sc of ["market", "simulate", "plan", "liquidate", "status", "report"]) {
+  for (const sc of ["market", "plan", "liquidate", "status", "report"]) {
     const buf = [];
     const orig = console.error;
     console.error = (m) => buf.push(m);
