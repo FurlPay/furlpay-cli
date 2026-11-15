@@ -213,6 +213,10 @@ async function main() {
     case "account":
       return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
 
+    // ---- market microstructure analytics (offline, supplied book) ----------
+    case "microstructure":
+      return require("../lib/microstructureCommands").run({ subcommand: args[0], args: args.slice(1), flags });
+
     // ---- fork asset operations (Phase 1: read-only intelligence + safety) --
     case "fork":
       return require("../lib/forkCommands").run({ subcommand: args[0], args: args.slice(1), flags });
