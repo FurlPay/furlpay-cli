@@ -1,12 +1,15 @@
 # @furlpay/cli
 
-FurlPay CLI — Stellar Tokenized Equities & RWAs, SDEX/Soroban Trading, x402 Micropayments & MCP Server.
+FurlPay CLI — Stellar Tokenized Equities & RWAs, SDEX/Soroban Trading, Binance Spot, Hyperliquid Perps, x402 Micropayments & MCP Server.
 
 [![npm](https://img.shields.io/npm/v/%40furlpay%2Fcli?logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@furlpay/cli)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ES2022-3178C6?logo=typescript&logoColor=white)](src/index.ts)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol_26-black?logo=stellar&logoColor=white)](https://stellar.org)
+[![Hyperliquid](https://img.shields.io/badge/Hyperliquid-L1_perps-97CE43)](https://hyperliquid.xyz)
+[![Binance](https://img.shields.io/badge/Binance-Spot_+_Futures-F0B90B?logo=binance&logoColor=black)](#binance-exchange-integration)
 [![MCP](https://img.shields.io/badge/MCP-server_mode-6E56CF?logo=anthropic&logoColor=white)](#model-context-protocol-mcp-ai-agents)
+[![tests](https://img.shields.io/badge/tests-node:test-green?logo=githubactions&logoColor=white)](test/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](../../LICENSE)
 
 High-performance terminal execution layer written in TypeScript for connecting Stellar hardware wallets, SDEX/Soroban **trade tooling** (Hyperliquid perp execution is live and signed; Stellar SDEX/Soroban execution is a clearly-labeled local simulation in this build — see the [honesty matrix](#what-is-live-vs-simulated-honesty-matrix)), surfacing **SEP-8 issuer-authorization requirements** for regulated tokenized equities (JQQQ, Securitize NVDA) and money market funds (FOBXX, USTBL) without ever faking an approval, resolving **x402 micropayment challenges** (simulated settlement), and running autonomous **Model Context Protocol (MCP)** agent trading runtimes.
@@ -515,6 +518,34 @@ furlpay doctor                # install, config, and connectivity diagnostics
 
 ---
 
+
+## Binance Exchange Integration (branch `feat/binance-integration` — TESTNET-READY, live verification BLOCKED on credentials)
+
+A first-class Binance adapter built on the same architecture as the Hyperliquid
+engine, behind the same Agent Trust controls.
+
+```bash
+# Credentials come from the environment only — never argv (visible in process listings)
+export BINANCE_API_KEY=...
+export BINANCE_API_SECRET=...
+export FURLPAY_BINANCE_ENV=testnet   # or mainnet — explicit, never silently swapped
+
+# Orders pass the Agent Trust mandate gate BEFORE any request is signed
+furlpay binance spot buy BTCUSDT --quote 50
+```
+
+Implemented in this build:
+
+| Capability | Status |
+|---|---|
+| HMAC-SHA256 request signing (deterministic, injected clock, recvWindow enforced at signing) | **IMPLEMENTED + TESTED** |
+| Spot REST client — balances, market/limit orders, cancel, open orders, ticker, order book | **IMPLEMENTED + TESTED** (stubbed transport) |
+| Testnet/mainnet as distinct constants — never silently swapped | **IMPLEMENTED + TESTED** |
+| Capability registry — withdrawals structurally absent (`false`, no method exists on the surface) | **IMPLEMENTED + TESTED** |
+| Agent Trust mandate gate runs BEFORE signing — a refused order builds no HTTP request | **IMPLEMENTED + TESTED** |
+| USD-M Futures, OCO, trailing stops, WebSocket streams | **NOT IMPLEMENTED** — declared `false` in the capability registry, never assumed |
+| Live/testnet end-to-end verification | **BLOCKED** — needs Binance API credentials with withdrawals disabled |
+
 ## What Is Live vs. Simulated (Honesty Matrix)
 
 Every execution surface in this CLI is labeled at runtime. Summary:
@@ -530,6 +561,7 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | HLP deposit / withdraw | **LIVE** (signed) | Real EIP-712 `vaultTransfer` actions; fail closed without `HYPERLIQUID_PRIVATE_KEY`/`ETH_PRIVATE_KEY` |
 | Hyperliquid perp execution (`hyperliquid trade`) | **LIVE** (signed) | Requires configured signer; pre-trade risk engine enforced |
 | Escrow (`furlpay escrow`) | **LOCAL LEDGER** | Deterministic state machine + audit log at `~/.furlpay/escrows.json`; fund/release require real `--tx-hash` (never fabricated); no on-chain contract is deployed |
+| Binance spot adapter (signed requests, balances, orders) | **IMPLEMENTED, TESTNET-BLOCKED** | Full unit battery against stubbed transport (14 tests: signing determinism, secret redaction, env separation, error surfacing, gate ordering); live/testnet end-to-end requires API credentials with withdrawals disabled. Exchange errors surface code+message+HTTP status — never a synthetic success. |
 | x402 settlement (`x402 pay`, MCP `furlpay_settle_invoice`) | **SIMULATED** | No live TigerBeetle facilitator in this build; responses say `SIMULATED` / `LOCAL_SIMULATION` |
 | Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build. SEP-8: `rwa kyc` reports `NOT_IMPLEMENTED` (exit 1), and regulated-asset trade results carry `sep8Status: "not_performed"` — compliance is never claimed. Registry carries no hardcoded APY and no invented approval-server URLs. |
 | MCP `furlpay_balance` (unauthenticated mode) | **SIMULATED** | Sample fixture balances, flagged `simulated: true` |
