@@ -1,0 +1,58 @@
+# FurlPay CLI
+
+> High-performance terminal execution layer for Stellar tokenized RWAs and SDEX/Soroban trading, Hyperliquid L1 perpetuals (live signed execution), Binance spot (testnet-ready), Bitcoin fork asset operations, market microstructure analytics, x402 micropayments, escrow settlement and an MCP agent server. Honesty-first: every surface is labeled LIVE, SIMULATED or NOT IMPLEMENTED at runtime.
+
+## Install
+
+- `npm install -g @furlpay/cli` — Node.js ≥ 22.19.0
+- `furlpay --version`, `furlpay doctor`, `furlpay update`
+
+## MCP tools (25)
+
+- `furlpay_settle_invoice`: settle HTTP 402 challenges (SIMULATED in this build)
+- `furlpay_trade`: limit/path/AMM orders on Stellar with delegated budget enforcement
+- `furlpay_trade_perp`: Hyperliquid L1 perpetual orders — LIVE signed execution
+- `furlpay_get_hlp_yield`: live HLP vault equity/APY/PnL; unreported fields → null
+- `furlpay_balance`: balances (simulated sample in unauthenticated mode)
+- `furlpay_get_quote`: multi-hop SDEX/Soroban quotes
+- `furlpay_sweep_treasury`: idle-USDC sweep (HLP real signed; FOBXX simulated)
+- `fork_list_networks`: declared 2026 fork networks (BTCB2, BTC1, ECX)
+- `fork_inspect_network`: full fork profile — snapshot blocks, replay protocol
+- `fork_replay_check`: offline replay-risk audit of a pre-fork BTC address
+- `microstructure_analytics`: OBI + Stoikov microprice over a supplied depth snapshot
+- `microstructure_vpin`: Easley/López de Prado/O'Hara flow toxicity over a supplied tape
+- `microstructure_quotes`: Avellaneda-Stoikov reservation price + optimal quotes
+
+## Key CLI commands
+
+- `furlpay hyperliquid trade --symbol BTC --side sell --size 0.05 --leverage 5` — LIVE signed short
+- `furlpay short mechanisms` — shorting venue registry with honest status
+- `furlpay short signal --book depth.json --tape trades.json --bucket 1000` — OBI/microprice/VPIN short-readiness check (read-only)
+- `furlpay fork networks` / `fork inspect BTCB2` / `fork eligibility BTCB2 --address <a>`
+- `furlpay fork simulate BTCB2 --book depth.json --amount 2 --side buy --max-slippage-bps 400`
+- `furlpay fork psbt-inspect <hex>` / `fork opreturn <payloadHex>` / `fork taint-plan <psbtHex>`
+- `furlpay microstructure analytics --book depth.json` / `vpin --tape trades.json --bucket <v>` / `quotes --mid-minor <n> …`
+- `furlpay tx verify <hash>` / `furlpay faucet --address <G...>` / `furlpay config validate` / `furlpay doctor`
+
+## Honesty matrix (summary)
+
+- LIVE: Hyperliquid market data + perp execution, HLP vault stats + transfers, tx verify (lookup), faucet (testnet), doctor
+- SIMULATED: x402 settlement, Stellar SDEX/Soroban order flow, SEP-8 KYC, FOBXX sweep
+- IMPLEMENTED (offline/testnet-blocked): Binance spot adapter, fork registry + replay audit + slippage simulator + sweep artifacts, microstructure analytics, shorting signals
+- NOT IMPLEMENTED (refuses with NOT_IMPLEMENTED): fork market/plan/liquidate/settlement, Binance futures/OCO/websockets/withdrawals
+
+## Security invariants
+
+- Withdrawals are structurally absent from the Binance adapter surface
+- Agent Trust mandate gate runs BEFORE any request is signed
+- Private keys: environment/stdin only, never argv, never logs
+- Integer-minor (BigInt) financial arithmetic everywhere; no floats on money paths
+- Every non-live surface is labeled at runtime — nothing fabricated
+
+## Docs
+
+- docs/BINANCE.md — Binance adapter setup, security boundary, verification status
+- docs/SHORTING.md — Bitcoin shorting execution + signal research
+- docs/FORKS.md — fork asset operations, replay auditing, sweep artifacts
+- docs/MICROSTRUCTURE.md — the four indicators, data formats, precision contract
+- docs/INSTALLATION.md, docs/UPDATING.md, docs/RELEASING.md, docs/PACKAGING.md
