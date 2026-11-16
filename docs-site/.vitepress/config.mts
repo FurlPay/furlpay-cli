@@ -22,6 +22,7 @@ export default defineConfig({
       { text: "Guide", link: "/guide/getting-started", activeMatch: "/guide/" },
       { text: "Reference", link: "/reference/cli", activeMatch: "/reference/" },
       { text: "Use Cases", link: "/use-cases", activeMatch: "/use-cases" },
+      { text: "Research", link: "/research/index", activeMatch: "/research/" },
       { text: "Compliance", link: "/compliance/regulatory", activeMatch: "/compliance/" },
     ],
     sidebar: {
@@ -80,6 +81,12 @@ export default defineConfig({
             { text: "Regulatory Overview", link: "/compliance/regulatory" },
             { text: "Developer Invariants", link: "/compliance/invariants" },
           ],
+        },
+      ],
+      "/research/": [
+        {
+          text: "Research",
+          items: [{ text: "Research Reports Index", link: "/research/index" }],
         },
       ],
       "/use-cases": [
