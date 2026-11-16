@@ -111,21 +111,33 @@ test("PSBT inspector fails closed on non-PSBT hex and truncated maps", () => {
   assert.match(inspectPsbt("70736274ff010203").reason, /truncated|magic|unsigned/);
 });
 
-test("decodeVarint handles 1/3/5-byte encodings", () => {
-  const b = Buffer.from("fcfd00fe000001", "hex"); // 0xfc=252, fd 00 00? — custom check
+test("decodeVarint handles 1/3/5/9-byte encodings (little-endian)", () => {
   assert.deepStrictEqual(decodeVarint(Buffer.from([252]), 0), [252, 1]);
   assert.deepStrictEqual(decodeVarint(Buffer.from("fd0010", "hex"), 0), [0x1000, 3]);
+  // 9-byte form: low word first. `01 00 00 00 00 00 00 00` = 1, not 2^32.
+  // (the old manual hi/lo assembly swapped the halves — audit P10)
+  assert.deepStrictEqual(
+    decodeVarint(Buffer.from("fe01000000", "hex"), 0), [1, 5]);
+  assert.deepStrictEqual(
+    decodeVarint(Buffer.from("ff0100000000000000", "hex"), 0), [1, 9]);
+  assert.deepStrictEqual(
+    decodeVarint(Buffer.from("ff0500000001000000", "hex"), 0), [0x100000005, 9]);
 });
 
-test("OP_RETURN barrier: 83-byte minimum enforced, PUSHDATA2 encoding exact", () => {
+test("OP_RETURN barrier: 83-byte minimum enforced, minimal BIP-62 push encoding", () => {
   assert.strictEqual(buildOpReturnBarrier("ab".repeat(41)).ok, false, "41 bytes < 83");
   const ok = buildOpReturnBarrier("ab".repeat(84)); // 84 bytes
   assert.strictEqual(ok.ok, true);
   assert.strictEqual(ok.payloadBytes, 84); // repeat(84) = 84 bytes
-  // script = 6a | 4d | lenLE(2) | payload
-  assert.ok(ok.scriptHex.startsWith("6a4d" + Buffer.from([84, 0]).toString("hex")));
+  // 84 bytes ≤ 255 → minimal encoding is OP_PUSHDATA1 (0x4c), NOT PUSHDATA2
+  // (non-minimal pushes violate BIP-62 — audit P10)
+  assert.strictEqual(ok.pushOpcode, "PUSHDATA1 (0x4c)");
+  assert.ok(ok.scriptHex.startsWith("6a4c" + Buffer.from([84]).toString("hex")));
   assert.ok(ok.scriptHex.endsWith("ab".repeat(84)));
   assert.ok(ok.reviewOnly);
+  // The 240-byte cap keeps every reachable payload (83..240) in PUSHDATA1
+  // territory — PUSHDATA2 (0x4d) can never be emitted, and a non-minimal
+  // PUSHDATA2 for an 83-byte payload (the old behavior) would violate BIP-62.
 });
 
 test("OP_RETURN barrier refuses floats-in-hex forms and oversized payloads", () => {

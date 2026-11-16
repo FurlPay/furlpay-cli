@@ -42,6 +42,13 @@ export class SdexTradingService {
     this.sponsorRelayer = new SponsorshipRelayer();
   }
 
+  /**
+   * Parse an asset string into a Stellar Asset. Fail-closed on issuers
+   * (audit P5): the old parser silently remapped every invalid issuer to
+   * Circle's USDC master address, so a typo'd or vanity issuer traded as an
+   * asset "issued" by Circle — an account that has never issued such an
+   * asset. Validation happens before any Asset is constructed.
+   */
   parseAsset(assetStr: string): Asset {
     const trimmed = assetStr.trim();
     if (trimmed.toUpperCase() === "XLM" || trimmed.toUpperCase() === "NATIVE") {
@@ -50,19 +57,26 @@ export class SdexTradingService {
     const [code, issuer] = trimmed.split(":");
     if (!issuer) {
       if (code.toUpperCase() === "USDC") {
+        // Bare "USDC" is the documented Circle issuer (real, checksum-valid,
+        // and verified against Circle's own stellar.toml).
         return new Asset("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN");
       }
-      throw new Error(`Asset '${assetStr}' must be formatted as 'CODE:ISSUER' (e.g. JQQQ:GDXF...)`);
+      throw new Error(`Asset '${assetStr}' must be formatted as 'CODE:ISSUER' (e.g. USDC:GA5Z...)`);
     }
 
+    let valid = false;
     try {
-      if (StrKey.isValidEd25519PublicKey(issuer)) {
-        return new Asset(code, issuer);
-      }
-    } catch {}
-
-    // Fallback for vanity / simulated identifiers
-    return new Asset(code, "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN");
+      valid = StrKey.isValidEd25519PublicKey(issuer);
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      throw new Error(
+        `Asset '${assetStr}' has an invalid issuer: '${issuer}' is not a valid Ed25519 public key. ` +
+          `Resolve the real issuer from the asset's signed stellar.toml (SEP-1) — there is no fallback issuer.`
+      );
+    }
+    return new Asset(code, issuer);
   }
 
   async executeLimitOrder(signer: SignerInterface, params: LimitOrderParams): Promise<SdexExecutionResult> {

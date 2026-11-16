@@ -11,19 +11,27 @@
  * 7. Expiry enforcement.
  */
 
-const { describe, it, beforeEach } = require("node:test");
+const { describe, it, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert");
 const { ethers } = require("ethers");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { AgentMandateEngine } = require("../dist/services/agent-mandate");
 
 describe("Autonomous Agent Mandates & MCP Security", () => {
   let engine;
+  let ledgerTmp;
   let ownerWallet;
   let agentWallet;
   let validMandate;
 
   beforeEach(async () => {
-    engine = new AgentMandateEngine();
+    // Isolated durable-ledger dir per test: the engine now persists spend
+    // and revocation state across instances (audit P8), so tests must not
+    // share (or leak into) the real ~/.furlpay/ledgers.
+    ledgerTmp = fs.mkdtempSync(path.join(os.tmpdir(), "furlpay-mandate-ledger-"));
+    engine = new AgentMandateEngine(ledgerTmp);
     ownerWallet = ethers.Wallet.createRandom();
     agentWallet = ethers.Wallet.createRandom();
 
@@ -48,6 +56,10 @@ describe("Autonomous Agent Mandates & MCP Security", () => {
       ...mandateData,
       issuerSignature,
     };
+  });
+
+  afterEach(() => {
+    if (ledgerTmp) fs.rmSync(ledgerTmp, { recursive: true, force: true });
   });
 
   it("should approve compliant transaction executed by mandated agent", () => {

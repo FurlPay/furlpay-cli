@@ -14,20 +14,28 @@ export class DecimalMath {
   /**
    * Parse a decimal string into a scaled BigInt.
    * Example: "42.85", decimals=6 -> 42850000n
+   *
+   * The sign is parsed independently of the digits: BigInt("-0") === 0n, so a
+   * `cleanInteger < 0n` test loses the sign of every -1 < x < 0 value
+   * (parseUnits("-0.50") used to return +500000n, inverting negative PnL and
+   * fees into gains — 2026-11-16 audit P2).
    */
   public static parseUnits(valStr: string | number, decimals: number = 6): bigint {
     const s = typeof valStr === "number" ? valStr.toString() : valStr.trim();
     if (!s || s === "NaN" || isNaN(Number(s))) return 0n;
+    // Only plain decimal notation is accepted: scientific form ("1e7") would
+    // otherwise throw out of BigInt() mid-calculation.
+    if (!/^[+-]?(\d+)?(\.\d*)?$/.test(s) || s === "." || s === "+" || s === "-") return 0n;
 
-    const [integerPart, fractionalPart = ""] = s.split(".");
+    const negative = s.startsWith("-");
+    const [integerPart, fractionalPart = ""] = s.replace(/^[+-]/, "").split(".");
     const cleanInteger = BigInt(integerPart || "0");
     const paddedFraction = fractionalPart.padEnd(decimals, "0").slice(0, decimals);
-    const fractionBig = BigInt(paddedFraction);
+    const fractionBig = BigInt(paddedFraction || "0");
 
     const scale = 10n ** BigInt(decimals);
-    return cleanInteger < 0n
-      ? cleanInteger * scale - fractionBig
-      : cleanInteger * scale + fractionBig;
+    const magnitude = cleanInteger * scale + fractionBig;
+    return negative ? -magnitude : magnitude;
   }
 
   /**
@@ -74,22 +82,30 @@ export class DecimalMath {
   /**
    * Discrete rounding to exact exchange tick size.
    * Example: price 92150.24 with tick 0.5 -> 92150.0
+   *
+   * Integer-minor arithmetic end to end (round half away from zero); the old
+   * Math.round/parseFloat path re-entered IEEE-754 on the decision boundary
+   * (audit P2).
    */
   public static roundToTick(priceStr: string | number, tickSize: number): string {
-    const p = typeof priceStr === "number" ? priceStr : parseFloat(priceStr);
-    const rounded = Math.round(p / tickSize) * tickSize;
+    const t = DecimalMath.parseUnits(tickSize, DecimalMath.PRICE_DECIMALS);
+    if (t <= 0n) throw new Error("INVALID_TICK_SIZE: tick size must be positive.");
     const decimals = tickSize < 1 ? Math.max(1, -Math.floor(Math.log10(tickSize))) : 1;
-    return rounded.toFixed(decimals);
+    const p = DecimalMath.parseUnits(priceStr, DecimalMath.PRICE_DECIMALS);
+    const half = p >= 0n ? t / 2n : -(t / 2n);
+    const roundedMinor = ((p + half) / t) * t;
+    const scaleOut = 10n ** BigInt(DecimalMath.PRICE_DECIMALS - decimals);
+    return DecimalMath.formatUnits(roundedMinor / scaleOut, decimals);
   }
 
   /**
-   * Discrete lot sizing for order base quantity.
+   * Discrete lot sizing for order base quantity — truncation toward zero at
+   * the lot precision (a size is never rounded UP past what the caller can
+   * fill). parseUnits already slices the fraction at `szDecimals` digits, so
+   * no float is involved.
    */
   public static roundToLot(szStr: string | number, szDecimals: number): string {
-    const s = typeof szStr === "number" ? szStr : parseFloat(szStr);
-    const factor = Math.pow(10, szDecimals);
-    const rounded = Math.floor(s * factor) / factor;
-    return rounded.toFixed(szDecimals);
+    return DecimalMath.formatUnits(DecimalMath.parseUnits(szStr, szDecimals), szDecimals);
   }
 
   /**

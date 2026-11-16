@@ -13,6 +13,16 @@
  */
 
 import * as crypto from "crypto";
+import { ethers } from "ethers";
+
+/**
+ * Canonical message a seller signs to authenticate a delivery proof:
+ * the escrow id binds the signature to THIS escrow (it cannot be replayed
+ * against another), the proof hash binds it to the pre-agreed deliverable.
+ */
+export function deliveryProofSigningMessage(escrowId: string, proofHash: string): string {
+  return `furlpay-escrow-proof:${escrowId}:${proofHash.toLowerCase()}`;
+}
 
 export type EscrowState =
   | "CREATED"
@@ -143,22 +153,71 @@ export class EscrowStateMachine {
 
   /**
    * 3. Submit cryptographic delivery proof.
+   *
+   * Fail-closed contract (2026-11-16 audit P6):
+   * - The proof hash MUST equal the pre-agreed `deliverySpecHash` the escrow
+   *   was created with — a seller cannot substitute a different deliverable.
+   * - The signature MUST cryptographically recover to the seller address over
+   *   the canonical `${escrowId}:${proofHash}` message. Any string that is
+   *   not a valid signature from the seller is rejected outright (the old
+   *   code accepted arbitrary strings — `sim:local-cli-attestation` et al).
+   * - `submittedAt` is ALWAYS the local ledger clock, never a caller-supplied
+   *   timestamp: a backdated `submittedAt: 0` used to make the auto-release
+   *   condition immediately true, draining buyer collateral without consent.
    */
   submitProof(actor: string, proof: DeliveryProof): void {
     if (this.state !== "DELIVERY_PENDING" && this.state !== "FUNDED") {
       throw new Error(`Invalid state transition: Cannot submit proof in state '${this.state}'.`);
     }
     if (actor.toLowerCase() !== this.terms.seller.toLowerCase()) {
-      throw new Error(`Unauthorized: Only seller can submit delivery proof.`);
+      throw new Error("Unauthorized: Only seller can submit delivery proof.");
     }
     if (!proof.proofHash || !/^0x[0-9a-fA-F]{64}$/.test(proof.proofHash)) {
       throw new Error("Invalid delivery proofHash: must be a 32-byte hex SHA-256 hash.");
     }
-    if (!proof.signature) {
-      throw new Error("Delivery proof must include seller cryptographic signature.");
+    if (proof.proofHash.toLowerCase() !== this.terms.deliverySpecHash.toLowerCase()) {
+      throw new Error(
+        `Proof hash mismatch: submitted ${proof.proofHash} does not equal the pre-agreed ` +
+          `delivery spec commitment ${this.terms.deliverySpecHash}. The escrow only accepts ` +
+          `the deliverable it was created for.`
+      );
+    }
+    if (!proof.signature || typeof proof.signature !== "string") {
+      throw new Error(
+        "Delivery proof must include the seller's cryptographic signature over " +
+          `${deliveryProofSigningMessage(this.terms.escrowId, proof.proofHash)}.`
+      );
+    }
+    if (!ethers.isAddress(this.terms.seller)) {
+      throw new Error(
+        `Cannot verify delivery proof: seller '${this.terms.seller}' is not an EVM address. ` +
+          `This ledger verifies seller signatures via ECDSA recovery — non-EVM sellers are ` +
+          `refused rather than recorded on an unverifiable attestation.`
+      );
+    }
+    let recovered: string;
+    try {
+      recovered = ethers.verifyMessage(
+        deliveryProofSigningMessage(this.terms.escrowId, proof.proofHash),
+        proof.signature
+      );
+    } catch (e: any) {
+      throw new Error(
+        `Invalid delivery proof signature (recovery failed: ${e.message}). The proof must be ` +
+          `an EVM signature by the seller over the canonical escrow proof message — arbitrary ` +
+          `attestation strings are not accepted.`
+      );
+    }
+    if (recovered.toLowerCase() !== this.terms.seller.toLowerCase()) {
+      throw new Error(
+        `Delivery proof signature mismatch: recovered signer ${recovered} is not the seller ` +
+          `of record ${this.terms.seller}.`
+      );
     }
 
-    this.deliveryProof = proof;
+    // Ledger clock only — the caller's submittedAt is recorded nowhere.
+    const recordedAt = Math.floor(Date.now() / 1000);
+    this.deliveryProof = { ...proof, submittedAt: recordedAt };
     this.recordTransition("PROOF_SUBMITTED", actor, "Seller submitted delivery proof commitment");
   }
 

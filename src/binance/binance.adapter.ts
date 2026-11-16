@@ -156,6 +156,40 @@ export class BinanceAdapter implements ExchangeAdapter {
   async cancelOrder(symbol: string, orderId: number): Promise<unknown> {
     return this.client.cancelSpotOrder(symbol, orderId);
   }
+
+  /**
+   * Market sell with an explicit base quantity. The gate runs on the
+   * price-derived notional BEFORE signing — a refused order never builds a
+   * request, same as marketOrder.
+   */
+  async marketSell(
+    symbol: string,
+    quantity: string,
+    mandateCheck: (intent: TradeIntent) => { authorized: boolean; reason?: string }
+  ): Promise<PlacedOrder> {
+    const qtyNum = Number(quantity);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
+      throw new Error(`quantity must be a positive finite number, got ${String(quantity)}`);
+    }
+    const ticker = await this.client.ticker24h(symbol.toUpperCase());
+    const notionalUsd = qtyNum * parseFloat(ticker.lastPrice || "0");
+    const intent: TradeIntent = {
+      symbol: symbol.toUpperCase(),
+      side: "SELL",
+      notionalUsd,
+      agentAddress: "cli",
+    };
+    const gate = mandateCheck(intent);
+    if (!gate.authorized) {
+      throw new Error(`POLICY_REFUSED: ${gate.reason ?? "mandate declined this order"}`);
+    }
+    return this.client.placeSpotOrder({
+      symbol: symbol.toUpperCase(),
+      side: "SELL",
+      type: "MARKET",
+      quantity,
+    });
+  }
 }
 
 export { BinanceApiError };

@@ -31,6 +31,7 @@ import { sanitizeTerminal } from "./tui/sanitize";
 import { verifyTransaction, TxVerificationResult } from "./stellar/txVerify";
 import { requestFunds, isValidStellarAddress, FaucetResult, FaucetNetwork } from "./stellar/faucet";
 import { validateConfig } from "./config/validate";
+import { BinanceAdapter } from "./binance/binance.adapter";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -48,16 +49,19 @@ export interface ParsedCliArgs {
  * CI and on every shell. A piped line ends at the first newline; a TTY user
  * is told the terminal echo stays on, so piping is recommended.
  */
+/**
+ * Read a secret from stdin. Piped input is read line-by-line as before.
+ *
+ * TTY input (audit P9, CWE-522) is read in RAW MODE with asterisk masking —
+ * the old readline path echoed master seed phrases and private keys to the
+ * screen character-by-character, exposing them to shoulder surfing, screen
+ * recordings and session logs. Only masking happens here: the value never
+ * appears in the terminal or in any log.
+ */
 async function readStdinSecret(): Promise<string | null> {
   if (process.stdin.isTTY) {
-    console.log("(reading from the terminal — pipe the value in instead so it is not echoed)");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const line = await new Promise<string>((resolve) => rl.question("", resolve));
-      return line.trim() || null;
-    } finally {
-      rl.close();
-    }
+    console.log("(reading from the terminal — input is masked; pipe the value in to avoid typing it)");
+    return readMaskedLine();
   }
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   try {
@@ -69,6 +73,68 @@ async function readStdinSecret(): Promise<string | null> {
   } finally {
     rl.close();
   }
+}
+
+/** One masked line from a TTY: raw mode, per-keystroke asterisks, no echo. */
+function readMaskedLine(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    let value = "";
+    let done = false;
+
+    const finish = (result: string | null) => {
+      if (done) return;
+      done = true;
+      stdin.removeListener("data", onData);
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        /* non-raw stdin */
+      }
+      stdin.pause();
+      process.stdout.write("\n");
+      resolve(result);
+    };
+
+    const onData = (chunk: string | Buffer) => {
+      // Paste bursts and terminal escape sequences arrive as multi-char
+      // chunks; single-char handling below stays correct because each char
+      // is processed independently.
+      for (const ch of String(chunk)) {
+        if (done) return;
+        if (ch === "\r" || ch === "\n") {
+          finish(value.trim() || null);
+          return;
+        }
+        if (ch === "\u0003") {
+          // Ctrl-C in raw mode arrives as data, not SIGINT — abort cleanly.
+          finish(null);
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stdout.write("\b \b");
+          }
+          continue;
+        }
+        if (ch < " " || ch === "\u001b") {
+          continue; // ignore other control chars / ESC sequence heads
+        }
+        value += ch;
+        process.stdout.write("*");
+      }
+    };
+
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      /* stdin may not support raw mode — fall through, still no echo */
+    }
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    stdin.on("data", onData);
+  });
 }
 
 export class FurlPayStellarCli {
@@ -158,6 +224,10 @@ export class FurlPayStellarCli {
 
       case "hyperliquid":
         await this.handleHyperliquid(subcommand, args, flags);
+        break;
+
+      case "binance":
+        await this.handleBinance(subcommand, args, flags);
         break;
 
       case "market":
@@ -692,6 +762,110 @@ export class FurlPayStellarCli {
     console.log("Usage: furlpay trading <limits|kill-switch>");
   }
 
+  /**
+   * `furlpay binance` — spot surface over BinanceAdapter. Credentials come
+   * from the environment only (the adapter refuses without them); the env is
+   * explicit (FURLPAY_BINANCE_ENV, testnet default) and never silently
+   * swapped. When --wallet <agent> is passed, every order rides the same
+   * atomic agent policy ledger as the MCP surface — validated BEFORE any
+   * request is signed.
+   */
+  private async handleBinance(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = subcommand || args[0];
+    const envRaw = String(process.env.FURLPAY_BINANCE_ENV || "testnet").toLowerCase();
+    const env = envRaw === "mainnet" ? "mainnet" : "testnet";
+    if (envRaw !== "mainnet" && envRaw !== "testnet") {
+      console.error(`[!] Unknown FURLPAY_BINANCE_ENV "${envRaw}" — using testnet (explicit values: testnet, mainnet).`);
+    }
+
+    const adapter = new BinanceAdapter({ env });
+
+    // Agent-trust gate: with a delegated policy, orders validate + record
+    // spend through AgentKeyService before the adapter builds a request.
+    const walletName = flags.wallet || flags["wallet"];
+    const mandateCheck = (intent: { symbol: string; side: string; notionalUsd: number }) => {
+      if (!walletName) return { authorized: true };
+      const gate = this.agentKeys.validateAndRecordSpend(walletName, intent.notionalUsd, "USDC");
+      return gate.allowed
+        ? { authorized: true as const }
+        : { authorized: false as const, reason: gate.reason };
+    };
+
+    if (sub === "balances") {
+      const balances = await adapter.balances();
+      console.log(`Binance Spot (${env}) balances:`);
+      for (const b of balances) {
+        console.log(`  ${b.asset.padEnd(10)} free: ${b.free.padEnd(18)} locked: ${b.locked}`);
+      }
+      return;
+    }
+
+    if (sub === "ticker") {
+      const symbol = args[1] || flags.symbol;
+      if (!symbol) {
+        console.log("Usage: furlpay binance ticker <SYMBOL>");
+        return;
+      }
+      const t = await adapter.ticker(symbol);
+      console.log(`${String(t.symbol).toUpperCase()} (${env}):`);
+      console.log(`  Last: \$${t.lastPrice}  24h change: ${t.priceChangePercent}%  24h volume: ${t.quoteVolume}`);
+      return;
+    }
+
+    if (sub === "spot") {
+      const action = args[1];
+      const symbol = args[2] || flags.symbol;
+      if ((action !== "buy" && action !== "sell") || !symbol) {
+        console.log("Usage: furlpay binance spot <buy|sell> <SYMBOL> [--quote <usd> | --qty <quantity>]");
+        return;
+      }
+      if (action === "buy") {
+        const quote = flags.quote !== undefined ? Number(flags.quote) : NaN;
+        if (!Number.isFinite(quote) || quote <= 0) {
+          throw new Error("Market buys require --quote <usd> (a positive quote amount).");
+        }
+        const res = await adapter.marketOrder(
+          { symbol, side: "BUY", notionalUsd: quote, agentAddress: walletName || "cli" },
+          mandateCheck
+        );
+        console.log(`[✓] Market BUY ${symbol.toUpperCase()} — ${res.status} (orderId ${res.orderId}, ${env})`);
+        return;
+      }
+      const qty = flags.qty !== undefined ? String(flags.qty) : undefined;
+      if (!qty) {
+        throw new Error("Market sells require --qty <quantity> (an exact base quantity; never derived from a float price).");
+      }
+      const res = await adapter.marketSell(symbol, qty, mandateCheck);
+      console.log(`[✓] Market SELL ${symbol.toUpperCase()} — ${res.status} (orderId ${res.orderId}, ${env})`);
+      return;
+    }
+
+    if (sub === "open-orders") {
+      const orders = await adapter.openOrders(flags.symbol);
+      console.log(`Binance ${env} open orders (${orders.length}):`);
+      for (const o of orders) {
+        console.log(`  #${o.orderId} ${o.symbol} ${o.side} ${o.origQty} @ ${o.price || "MARKET"} (${o.status})`);
+      }
+      return;
+    }
+
+    if (sub === "cancel") {
+      const orderId = parseInt(flags["order-id"] || args[1] || "0");
+      const symbol = flags.symbol || args[2];
+      if (!orderId || !symbol) {
+        console.log("Usage: furlpay binance cancel <orderId> --symbol <SYMBOL>");
+        return;
+      }
+      await adapter.cancelOrder(symbol, orderId);
+      console.log(`[✓] Canceled order #${orderId} for ${symbol.toUpperCase()} (${env}).`);
+      return;
+    }
+
+    console.log("Usage: furlpay binance <balances|ticker|spot|open-orders|cancel> [options]");
+    console.log("  Credentials: BINANCE_API_KEY / BINANCE_API_SECRET env vars (never argv).");
+    console.log("  Network: FURLPAY_BINANCE_ENV=testnet|mainnet (default testnet).");
+  }
+
   private async handleEscrow(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
     const sub = subcommand || args[0] || "status";
     const store = new EscrowStore();
@@ -778,11 +952,15 @@ export class FurlPayStellarCli {
       if (!proofHash || !/^0x[0-9a-fA-F]{64}$/.test(String(proofHash))) {
         throw new Error("Invalid proof hash: pass --hash <0x-prefixed 32-byte hex SHA-256 of the delivered artifact>.");
       }
-      const signature = flags.signature
-        ? String(flags.signature)
-        : `sim:local-cli-attestation:${Date.now()}`;
-      if (signature.startsWith("sim:")) {
-        console.log(`[!] No --signature provided — recording a local CLI attestation (simulation), not a cryptographic seller signature.`);
+      const signature = flags.signature ? String(flags.signature) : undefined;
+      if (!signature) {
+        throw new Error(
+          "Delivery proof requires --signature: the seller's EVM signature over the canonical " +
+            `message furlpay-escrow-proof:${sm.getEscrowId()}:${String(proofHash).toLowerCase()} ` +
+            "(e.g. an ethers Wallet.signMessage output). Unattested proofs are refused — the " +
+            "CLI no longer records a local simulation string in place of a cryptographic " +
+            "seller signature."
+        );
       }
       // The local operator acts as the seller of record when submitting delivery proof.
       sm.submitProof(sm.getTerms().seller, {

@@ -85,7 +85,16 @@ export class BinanceClient {
     return this.parse(res);
   }
 
-  /** Signed (private) request — account, orders. The secret never leaves. */
+  /**
+   * Signed (private) request — account, orders. The secret never leaves.
+   *
+   * Transport (audit P4, CWE-598): GET carries the signed payload in the URL
+   * query; POST/PUT/DELETE carry it as an application/x-www-form-urlencoded
+   * REQUEST BODY. The old code put order parameters in the query string for
+   * every method, leaking symbols, quantities and client order ids into
+   * proxies, access logs and browser-grade URL captures. The signature still
+   * covers exactly the bytes sent — only their location changed.
+   */
   async signedRequest<T>(
     method: "GET" | "POST" | "DELETE" | "PUT",
     path: string,
@@ -98,10 +107,14 @@ export class BinanceClient {
       params,
       { nowMs: this.nowMs(), recvWindowMs: this.recvWindowMs }
     );
-    const url = `${this.host}${path}?${signed.queryString}`;
+    const sendInBody = method !== "GET";
+    const url = `${this.host}${path}${sendInBody ? "" : `?${signed.queryString}`}`;
     const res = await this.fetchImpl(url, {
       method,
-      headers: signed.headers,
+      headers: sendInBody
+        ? { ...signed.headers, "Content-Type": "application/x-www-form-urlencoded" }
+        : signed.headers,
+      ...(sendInBody ? { body: signed.queryString } : {}),
     });
     return this.parse<T>(res);
   }

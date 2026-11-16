@@ -134,9 +134,19 @@ export class HlpVaultService {
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);
     
     const res = await this.client.submitAction(action, signature, nonce, this.vaultAddress);
-    const txHash = res?.response?.data?.txHash || (res?.status === "ok" ? `hlp_dep_${nonce}` : undefined);
-    if (!txHash) {
-      throw new Error(`Hyperliquid HLP Error: Deposit transaction was not confirmed by the exchange (${JSON.stringify(res)})`);
+    // Fail closed: a CONFIRMED result requires the exchange's own transaction
+    // hash. The old `hlp_dep_<nonce>` fallback fabricated an audit token for
+    // a deposit the response never actually confirmed (audit P11).
+    if (res?.status !== "ok") {
+      throw new Error(`Hyperliquid HLP Error: Deposit was not accepted by the exchange (${JSON.stringify(res)})`);
+    }
+    const txHash = res?.response?.data?.txHash;
+    if (!txHash || typeof txHash !== "string") {
+      throw new Error(
+        "Hyperliquid HLP Error: exchange accepted the vaultTransfer but returned no transaction hash — " +
+          "deposit state is UNCONFIRMED. Query the vault/leaderboard directly before retrying; " +
+          "retrying blindly risks a double deposit."
+      );
     }
 
     const lockupExpiry = new Date(Date.now() + this.LOCKUP_PERIOD_MS).toISOString();
@@ -179,11 +189,23 @@ export class HlpVaultService {
     const nonce = Date.now();
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);
     const res = await this.client.submitAction(action, signature, nonce, this.vaultAddress);
+    // Fail closed — same contract as deposit: no exchange-issued hash means
+    // no CONFIRMED status and never a synthetic `hlp_wd_` token (audit P11).
+    if (res?.status !== "ok") {
+      throw new Error(`Hyperliquid HLP Error: Withdrawal was not accepted by the exchange (${JSON.stringify(res)})`);
+    }
+    const txHash = res?.response?.data?.txHash;
+    if (!txHash || typeof txHash !== "string") {
+      throw new Error(
+        "Hyperliquid HLP Error: exchange accepted the vaultTransfer but returned no transaction hash — " +
+          "withdrawal state is UNCONFIRMED. Do not treat the withdrawal as complete."
+      );
+    }
 
     return {
       status: "CONFIRMED",
       usdReceived: amountUsd,
-      txHash: res?.response?.data?.txHash || `hlp_wd_${nonce}`,
+      txHash,
     };
   }
 }

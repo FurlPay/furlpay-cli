@@ -197,9 +197,16 @@ test("an authorized market buy sends quoteOrderQty and surfaces the exchange's o
     assert.strictEqual(order.orderId, 991);
     assert.strictEqual(order.status, "NEW");
     const call = fetchImpl.calls[0];
-    assert.ok(call.url.includes("type=MARKET"));
-    assert.ok(call.url.includes("quoteOrderQty=50"));
-    assert.ok(call.url.includes("symbol=BTCUSDT"));
+    // POST order parameters travel in the urlencoded REQUEST BODY, never the
+    // URL query — order details must not leak into proxies and access logs
+    // (audit P4, CWE-598).
+    assert.strictEqual(call.init.method, "POST");
+    assert.strictEqual(call.init.headers["Content-Type"], "application/x-www-form-urlencoded");
+    assert.ok(call.init.body.includes("type=MARKET"));
+    assert.ok(call.init.body.includes("quoteOrderQty=50"));
+    assert.ok(call.init.body.includes("symbol=BTCUSDT"));
+    assert.ok(call.init.body.includes("signature="));
+    assert.ok(!call.url.includes("type=MARKET"), "order params must not appear in the URL");
   } finally {
     if (saved.k) process.env.BINANCE_API_KEY = saved.k;
     else delete process.env.BINANCE_API_KEY;

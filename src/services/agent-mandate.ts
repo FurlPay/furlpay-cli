@@ -12,7 +12,17 @@
  */
 
 import * as crypto from "crypto";
+import * as path from "path";
 import { ethers } from "ethers";
+import { ledgerDir, withLedgerLock, readLedger, writeLedger } from "./persistentLedger";
+
+interface SpendLedger {
+  agents: Record<string, { day: number; spentUsd: number }>;
+}
+
+interface RevocationLedger {
+  revoked: Record<string, number>; // mandateId -> revokedAt (epoch ms)
+}
 
 export interface SpendingMandate {
   mandateId: string;
@@ -37,8 +47,15 @@ export interface AuthorizationDecision {
 }
 
 export class AgentMandateEngine {
-  private dailySpendByAgent: Map<string, { day: number; spentUsd: number }> = new Map();
-  private revokedMandates: Set<string> = new Set();
+  /**
+   * P8 (2026-11-16 audit): daily-spend and revocation state previously lived
+   * in an in-memory Map/Set that reset on every process exit — an agent could
+   * evade its daily velocity cap simply by running each transaction in a new
+   * CLI invocation, and "revoked" mandates resurrected on restart. Both are
+   * now durable file ledgers mutated under an exclusive lock.
+   */
+  private spendLedgerPath: string;
+  private revocationLedgerPath: string;
   private auditTrail: Array<{
     timestamp: number;
     agentPublicKey: string;
@@ -46,6 +63,13 @@ export class AgentMandateEngine {
     amountUsd: number;
     decision: AuthorizationDecision;
   }> = [];
+
+  /** @param customLedgerDir inject a directory for tests; defaults to ~/.furlpay/ledgers. */
+  constructor(customLedgerDir?: string) {
+    const dir = ledgerDir(customLedgerDir);
+    this.spendLedgerPath = path.join(dir, "agent-mandate-spend.json");
+    this.revocationLedgerPath = path.join(dir, "agent-mandate-revocations.json");
+  }
 
   /**
    * Helper to compute deterministic hash of a mandate.
@@ -67,14 +91,20 @@ export class AgentMandateEngine {
   }
 
   /**
-   * Revoke a mandate immediately.
+   * Revoke a mandate immediately — durably. A revocation that vanished on
+   * process exit was never a revocation (audit P8).
    */
   revokeMandate(mandateId: string): void {
-    this.revokedMandates.add(mandateId);
+    withLedgerLock(this.revocationLedgerPath, () => {
+      const ledger = readLedger<RevocationLedger>(this.revocationLedgerPath) ?? { revoked: {} };
+      ledger.revoked[mandateId] = Date.now();
+      writeLedger(this.revocationLedgerPath, ledger);
+    });
   }
 
   isRevoked(mandateId: string): boolean {
-    return this.revokedMandates.has(mandateId);
+    const ledger = readLedger<RevocationLedger>(this.revocationLedgerPath);
+    return ledger?.revoked?.[mandateId] !== undefined;
   }
 
   /**
@@ -85,8 +115,8 @@ export class AgentMandateEngine {
       return { valid: false, error: "invalid_mandate_format" };
     }
 
-    // 1. Check revocation registry
-    if (this.revokedMandates.has(mandate.mandateId)) {
+    // 1. Check revocation registry (durable ledger)
+    if (this.isRevoked(mandate.mandateId)) {
       return { valid: false, error: "mandate_has_been_revoked" };
     }
 
@@ -236,26 +266,46 @@ export class AgentMandateEngine {
       return decision;
     }
 
-    // 5. Daily cumulative velocity cap check
+    // 5. Daily cumulative velocity cap check — read-validate-record runs
+    // atomically under the durable ledger lock, so two concurrent CLI/MCP
+    // processes cannot both pass the cap against the same pre-spend balance
+    // (audit P8: the in-memory Map reset on every process exit).
     const agentSpendKey = `${mandate.mandateId}:${agentPublicKey.toLowerCase()}`;
-    let spendRecord = this.dailySpendByAgent.get(agentSpendKey);
-    if (!spendRecord || spendRecord.day !== currentDay) {
-      spendRecord = { day: currentDay, spentUsd: 0 };
-    }
+    let deniedSpentToday = 0;
+    const recorded = withLedgerLock(this.spendLedgerPath, (): { day: number; spentUsd: number } | null => {
+      const ledger = readLedger<SpendLedger>(this.spendLedgerPath) ?? { agents: {} };
+      let spendRecord = ledger.agents[agentSpendKey];
+      if (!spendRecord || spendRecord.day !== currentDay) {
+        spendRecord = { day: currentDay, spentUsd: 0 };
+      }
+      if (spendRecord.spentUsd + amountUsd > mandate.dailyVelocityCapUsd) {
+        // Denied: persist nothing (prune stale-day entries only).
+        for (const key of Object.keys(ledger.agents)) {
+          if (ledger.agents[key].day !== currentDay) delete ledger.agents[key];
+        }
+        writeLedger(this.spendLedgerPath, ledger);
+        deniedSpentToday = spendRecord.spentUsd;
+        return null;
+      }
+      spendRecord.spentUsd += amountUsd;
+      ledger.agents[agentSpendKey] = spendRecord;
+      // Prune stale-day entries: a non-current day can never become current again.
+      for (const key of Object.keys(ledger.agents)) {
+        if (key !== agentSpendKey && ledger.agents[key].day !== currentDay) delete ledger.agents[key];
+      }
+      writeLedger(this.spendLedgerPath, ledger);
+      return spendRecord;
+    });
 
-    if (spendRecord.spentUsd + amountUsd > mandate.dailyVelocityCapUsd) {
+    if (recorded === null) {
       const decision: AuthorizationDecision = {
         approved: false,
         requiresHumanApproval: true,
-        reason: `Payment would breach daily velocity cap of \$${mandate.dailyVelocityCapUsd.toFixed(2)} (Already spent today: \$${spendRecord.spentUsd.toFixed(2)}).`,
+        reason: `Payment would breach daily velocity cap of \$${mandate.dailyVelocityCapUsd.toFixed(2)} (Already spent today: \$${deniedSpentToday.toFixed(2)}).`,
       };
       this.recordAudit(agentPublicKey, action, amountUsd, decision);
       return decision;
     }
-
-    // Update cumulative spend
-    spendRecord.spentUsd += amountUsd;
-    this.dailySpendByAgent.set(agentSpendKey, spendRecord);
 
     const tokenBytes = crypto.randomBytes(16).toString("hex");
     const authToken = `auth_mandate_${tokenBytes}`;
@@ -264,7 +314,7 @@ export class AgentMandateEngine {
       approved: true,
       requiresHumanApproval: false,
       authorizationToken: authToken,
-      spentTodayUsd: spendRecord.spentUsd,
+      spentTodayUsd: recorded.spentUsd,
     };
 
     this.recordAudit(agentPublicKey, action, amountUsd, decision);

@@ -66,6 +66,14 @@ ${c.bold("Hyperliquid L1 Trading & Perpetuals")}
   earn hlp [stats|deposit|withdraw]              Deposit idle USDC into HLP vault (4-day lockup)
   market <SYM> [--size <sz>]                     Depth-weighted micro-price, OFI & slippage estimates
 
+${c.bold("Binance Spot (credentials from env only; withdrawals structurally absent)")}
+  binance balances                               Spot account balances (testnet/mainnet via FURLPAY_BINANCE_ENV)
+  binance ticker <SYM>                           24h ticker for a symbol
+  binance spot buy <SYM> --quote <usd>           Market buy by quote amount — behind the agent-trust gate
+  binance spot sell <SYM> --qty <q>              Market sell by base quantity — behind the agent-trust gate
+  binance open-orders [--symbol <SYM>]           List resting orders
+  binance cancel <orderId> --symbol <SYM>        Cancel a resting order
+
 ${c.bold("Escrow & Time-Locked Settlement (ETSS)")}
   escrow create --amount 1000 --seller <addr>    Initialize atomic escrow with cryptographic proof
   escrow fund --escrow-id <id>                   Buyer collateral lock & state transition
@@ -211,6 +219,7 @@ async function main() {
     case "trading":
     case "escrow":
     case "account":
+    case "binance":
       return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
 
     // ---- market microstructure analytics (offline, supplied book) ----------

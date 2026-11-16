@@ -12,7 +12,9 @@ import type { BinanceCredentials } from "./binance.types.js";
 export const DEFAULT_RECV_WINDOW_MS = 5_000;
 
 export interface SignedRequestParts {
-  /** Query string WITH the signature appended — the exact bytes to send. */
+  /** The signed payload WITH the signature appended — the exact bytes to
+   *  send. GET puts them in the URL query; POST/PUT/DELETE put them in an
+   *  application/x-www-form-urlencoded body (audit P4, CWE-598). */
   readonly queryString: string;
   readonly headers: Readonly<Record<string, string>>;
 }

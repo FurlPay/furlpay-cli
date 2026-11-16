@@ -99,8 +99,11 @@ export class HyperliquidPerpService {
     let orderTypeWire: any;
 
     if (params.orderType === "market") {
-      // Market order executed as aggressive IOC with 5% slippage buffer
-      const slippageBuffer = 0.05;
+      // Market order executed as aggressive IOC with a 50 bps (0.5%) slippage
+      // buffer. The old 5% buffer let a market order walk five full percent
+      // past the touch before the exchange would reject it — on BTC that is a
+      // $4,500 donation per round lot at $90k (audit P11).
+      const slippageBuffer = 0.005;
       targetPrice = params.side === "buy" ? bestAsk * (1 + slippageBuffer) : bestBid * (1 - slippageBuffer);
       orderTypeWire = { limit: { tif: "Ioc" } };
     } else {

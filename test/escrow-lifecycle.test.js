@@ -12,10 +12,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { ethers } = require("ethers");
 
 const {
   EscrowStateMachine,
   EscrowStore,
+  deliveryProofSigningMessage,
   sanitizeTerminal,
 } = require("../dist/index");
 
@@ -40,14 +42,26 @@ function tempStorePath() {
   return path.join(dir, "escrows.json");
 }
 
-test("escrow: serialize/deserialize round-trip preserves state and audit log", () => {
-  const sm = new EscrowStateMachine(makeTerms());
-  sm.fund(makeTerms().buyer, "0xfund_tx_1");
-  sm.submitProof(makeTerms().seller, {
-    proofHash: "0x" + "ab".repeat(32),
-    signature: "sig-test",
-    submittedAt: Math.floor(Date.now() / 1000),
-  });
+// Proofs must now carry the seller's real signature over the canonical
+// escrow message (audit P6) — the old "sig-test"/sim: strings are refused.
+function makeSellerSigner() {
+  return ethers.Wallet.createRandom();
+}
+
+async function signProof(machine, sellerWallet, terms) {
+  const proofHash = terms.deliverySpecHash;
+  const signature = await sellerWallet.signMessage(
+    deliveryProofSigningMessage(machine.getEscrowId(), proofHash)
+  );
+  return { proofHash, signature, submittedAt: 0 };
+}
+
+test("escrow: serialize/deserialize round-trip preserves state and audit log", async () => {
+  const sellerWallet = makeSellerSigner();
+  const terms = makeTerms({ seller: sellerWallet.address });
+  const sm = new EscrowStateMachine(terms);
+  sm.fund(terms.buyer, "0xfund_tx_1");
+  sm.submitProof(terms.seller, await signProof(sm, sellerWallet, terms));
 
   const snapshot = sm.serialize();
   assert.strictEqual(snapshot.schema, "furlpay-escrow-v1");
@@ -83,9 +97,10 @@ test("escrow store: persists across instances in a durable JSON file", () => {
   assert.strictEqual(store2.list().length, 1);
 });
 
-test("escrow store: full happy-path lifecycle create→fund→proof→release", () => {
+test("escrow store: full happy-path lifecycle create→fund→proof→release", async () => {
   const store = new EscrowStore(tempStorePath());
-  const terms = makeTerms();
+  const sellerWallet = makeSellerSigner();
+  const terms = makeTerms({ seller: sellerWallet.address });
 
   let sm = new EscrowStateMachine(terms);
   store.save(sm);
@@ -97,11 +112,7 @@ test("escrow store: full happy-path lifecycle create→fund→proof→release", 
 
   sm = store.loadMachine(terms.escrowId);
   assert.strictEqual(sm.getState(), "FUNDED");
-  sm.submitProof(terms.seller, {
-    proofHash: "0x" + "ab".repeat(32),
-    signature: "sim:local-cli-attestation:123",
-    submittedAt: Math.floor(Date.now() / 1000),
-  });
+  sm.submitProof(terms.seller, await signProof(sm, sellerWallet, terms));
   store.save(sm);
 
   sm = store.loadMachine(terms.escrowId);
@@ -131,8 +142,9 @@ test("escrow store: dispute path records DISPUTED state", () => {
   assert.strictEqual(store.loadMachine(terms.escrowId).getState(), "DISPUTED");
 });
 
-test("escrow state machine: unauthorized actors and bad proofs fail closed", () => {
-  const terms = makeTerms();
+test("escrow state machine: unauthorized actors and bad proofs fail closed", async () => {
+  const sellerWallet = makeSellerSigner();
+  const terms = makeTerms({ seller: sellerWallet.address });
   const sm = new EscrowStateMachine(terms);
 
   assert.throws(() => sm.fund(terms.seller, "0xaa"), /Only buyer/);
@@ -142,7 +154,26 @@ test("escrow state machine: unauthorized actors and bad proofs fail closed", () 
     () => sm.submitProof(terms.seller, { proofHash: "not-a-hash", signature: "sig" }),
     /32-byte hex/
   );
-  assert.throws(() => sm.submitProof(terms.buyer, { proofHash: "0x" + "ab".repeat(32), signature: "s" }), /Only seller/);
+  assert.throws(() => sm.submitProof(terms.buyer, { proofHash: terms.deliverySpecHash, signature: "s" }), /Only seller/);
+  // Legacy attestation strings and unsigned proofs are refused outright (P6).
+  assert.throws(
+    () => sm.submitProof(terms.seller, { proofHash: terms.deliverySpecHash, signature: "sim:local-cli-attestation:123", submittedAt: 0 }),
+    /recovery failed|Invalid delivery proof signature/
+  );
+  // Wrong deliverable hash (even properly seller-signed) is refused.
+  const wrongHash = "0x" + "ab".repeat(32);
+  const wrongHashSig = await sellerWallet.signMessage(
+    deliveryProofSigningMessage(sm.getEscrowId(), wrongHash)
+  );
+  assert.throws(
+    () =>
+      sm.submitProof(terms.seller, {
+        proofHash: wrongHash,
+        signature: wrongHashSig,
+        submittedAt: 0,
+      }),
+    /Proof hash mismatch/
+  );
   assert.throws(() => sm.dispute("0x9999999999999999999999999999999999999999", "nope"), /counterparties/);
 });
 

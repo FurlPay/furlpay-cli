@@ -11,11 +11,23 @@
  * 4. Recipient binding: authorization.to MUST match requirement payTo.
  * 5. Amount binding: authorization.value MUST cover required payment.
  * 6. Validity window: validAfter <= now <= validBefore.
- * 7. Nonce replay protection: each 32-byte nonce can only be consumed once.
+ * 7. Nonce replay protection: each 32-byte nonce can only be consumed once —
+ *    backed by a DURABLE file ledger (audit P8) so a nonce consumed by one
+ *    CLI/MCP process stays consumed after it exits. Entries older than the
+ *    retention window are pruned on write.
  * 8. Zero fake-signature fallback: invalid/zero signatures are strictly rejected.
  */
 
+import * as fs from "fs";
+import * as path from "path";
 import { ethers } from "ethers";
+import { ledgerDir, withLedgerLock, readLedger, writeLedger } from "./persistentLedger";
+
+interface NonceLedger {
+  nonces: Record<string, number>; // replayKey -> consumedAt (epoch ms)
+}
+
+const NONCE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — far outlives any validBefore window
 
 export interface AuthorizationPayload {
   from: string;
@@ -66,7 +78,42 @@ export const TRANSFER_WITH_AUTHORIZATION_TYPES = {
 };
 
 export class X402Facilitator {
-  private consumedNonces: Set<string> = new Set();
+  private nonceLedgerPath: string;
+
+  /**
+   * @param customLedgerDir inject a directory for tests; defaults to
+   *   ~/.furlpay/ledgers (0700). The in-memory Set this replaces (audit P8)
+   *   reset on every process exit, silently re-arming replayed authorizations.
+   */
+  constructor(customLedgerDir?: string) {
+    this.nonceLedgerPath = path.join(ledgerDir(customLedgerDir), "x402-nonces.json");
+  }
+
+  /** Fast read-only replay lookup (authoritative check happens under lock at consumption). */
+  private lookupNonce(replayKey: string): number | undefined {
+    const ledger = readLedger<NonceLedger>(this.nonceLedgerPath);
+    return ledger?.nonces?.[replayKey];
+  }
+
+  /**
+   * Atomically mark a nonce consumed. Returns false if a concurrent process
+   * consumed it between the fast-path check and this call — the caller then
+   * reports nonce_already_consumed instead of double-verifying.
+   */
+  private consumeNonceAtomic(replayKey: string): boolean {
+    return withLedgerLock(this.nonceLedgerPath, () => {
+      const ledger = readLedger<NonceLedger>(this.nonceLedgerPath) ?? { nonces: {} };
+      const nowMs = Date.now();
+      // Prune stale entries so the ledger cannot grow without bound.
+      for (const key of Object.keys(ledger.nonces)) {
+        if (nowMs - ledger.nonces[key] > NONCE_RETENTION_MS) delete ledger.nonces[key];
+      }
+      if (ledger.nonces[replayKey] !== undefined) return false;
+      ledger.nonces[replayKey] = nowMs;
+      writeLedger(this.nonceLedgerPath, ledger);
+      return true;
+    });
+  }
 
   /**
    * Cryptographically verify an incoming EIP-712 transfer authorization against payment requirements.
@@ -140,9 +187,10 @@ export class X402Facilitator {
       return { verified: false, reason: "authorization_expired" };
     }
 
-    // 7. Replay protection check
+    // 7. Replay protection check (fast path — the durable ledger is the
+    // source of truth; consumption re-checks under the ledger lock)
     const replayKey = `${requirements.network}:${requirements.asset.toLowerCase()}:${auth.from.toLowerCase()}:${auth.nonce.toLowerCase()}`;
-    if (this.consumedNonces.has(replayKey)) {
+    if (this.lookupNonce(replayKey) !== undefined) {
       return { verified: false, reason: "nonce_already_consumed" };
     }
 
@@ -184,8 +232,11 @@ export class X402Facilitator {
       };
     }
 
-    // Mark nonce consumed
-    this.consumedNonces.add(replayKey);
+    // Mark nonce consumed — atomically against the durable ledger. A nonce
+    // that lost a concurrent race reports as already consumed (audit P8).
+    if (!this.consumeNonceAtomic(replayKey)) {
+      return { verified: false, reason: "nonce_already_consumed" };
+    }
 
     return {
       verified: true,
@@ -237,9 +288,14 @@ export class X402Facilitator {
   }
 
   /**
-   * Reset replay cache (for testing only).
+   * Reset replay cache (for testing only). Clears the durable ledger too —
+   * a "reset" that left nonces on disk would be a lie about security state.
    */
   resetCache(): void {
-    this.consumedNonces.clear();
+    try {
+      fs.rmSync(this.nonceLedgerPath, { force: true });
+    } catch {
+      /* best effort */
+    }
   }
 }

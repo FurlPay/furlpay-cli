@@ -14,13 +14,17 @@
  * 10. Rejection of mismatched chainId / token contract.
  */
 
-const { describe, it, beforeEach } = require("node:test");
+const { describe, it, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert");
 const { ethers } = require("ethers");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { X402Facilitator } = require("../dist/services/x402-facilitator");
 
 describe("P0 Security: x402 Cryptographic Signature Verification", () => {
   let facilitator;
+  let ledgerTmp;
   let payerWallet;
   let attackerWallet;
   let recipientAddress;
@@ -28,7 +32,11 @@ describe("P0 Security: x402 Cryptographic Signature Verification", () => {
   let requirements;
 
   beforeEach(() => {
-    facilitator = new X402Facilitator();
+    // Isolated durable-ledger dir per test: consumed nonces now persist on
+    // disk across instances (audit P8) — tests must not share the real
+    // ~/.furlpay/ledgers or leak state between runs.
+    ledgerTmp = fs.mkdtempSync(path.join(os.tmpdir(), "furlpay-x402-ledger-"));
+    facilitator = new X402Facilitator(ledgerTmp);
     payerWallet = ethers.Wallet.createRandom();
     attackerWallet = ethers.Wallet.createRandom();
     recipientAddress = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -43,6 +51,10 @@ describe("P0 Security: x402 Cryptographic Signature Verification", () => {
       domainName: "USD Coin",
       domainVersion: "2",
     };
+  });
+
+  afterEach(() => {
+    if (ledgerTmp) fs.rmSync(ledgerTmp, { recursive: true, force: true });
   });
 
   it("should successfully verify a genuine EIP-712 transfer authorization", async () => {

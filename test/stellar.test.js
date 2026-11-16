@@ -133,10 +133,16 @@ test("FurlPay Stellar: SDEX Limit Order Execution with SEP-8 & Fee-Bump Sponsors
   const kp = Keypair.random();
   const signer = new KeypairSigner(kp);
 
+  // Audit P5: issuers must be real checksum-valid Ed25519 keys. A random
+  // keypair stands in for a resolved-from-stellar.toml issuer; the old
+  // vanity string is asserted refused below — it used to silently trade as
+  // an asset "issued" by Circle's USDC master account.
+  const issuer = Keypair.random().publicKey();
+
   const res = await sdex.executeLimitOrder(signer, {
     side: "buy",
-    asset: "JQQQ:GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ",
-    against: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    asset: `JQQQ:${issuer}`,
+    against: "USDC",
     amount: "25",
     price: "104.20",
     sponsor: true,
@@ -153,6 +159,28 @@ test("FurlPay Stellar: SDEX Limit Order Execution with SEP-8 & Fee-Bump Sponsors
   assert.strictEqual(res.sep8Status, "not_performed");
   assert.ok(res.sep8Note.includes("not implemented in this build"));
   assert.ok(res.feePaidUsd.includes("Sponsored"));
+});
+
+test("FurlPay Stellar P5 Invariant: invalid issuer keys fail closed — no Circle fallback", async () => {
+  const sdex = new SdexTradingService();
+  const kp = Keypair.random();
+  const signer = new KeypairSigner(kp);
+
+  // The vanity string from the pre-audit registry fails StrKey CRC16
+  // validation; execution must refuse, never remap to Circle's issuer.
+  await assert.rejects(
+    async () => {
+      await sdex.executeLimitOrder(signer, {
+        side: "buy",
+        asset: "JQQQ:GDXFE4P76X667RKYHVMZ4H5XQWPLK3X72Z7YXZGHK8R5M7OQ3V7QJQQQ",
+        against: "USDC",
+        amount: "25",
+        price: "104.20",
+        sponsor: true,
+      });
+    },
+    { message: /invalid issuer.*no fallback issuer/s }
+  );
 });
 
 test("FurlPay Stellar: Path Payment Strict Send with Guaranteed Dest Min", async () => {
@@ -286,12 +314,14 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
   assert.strictEqual(fobxxSweep.apy, null);
   assert.ok(fobxxSweep.apy_note.includes("no issuer data source"));
 
-  // Mutating tool without configured signer must strictly fail closed
+  // Mutating tool with NO agent policy configured must strictly fail closed
+  // (audit P1): the policy gate fires before any signer check — an
+  // unconfigured MCP server never moves value.
   await assert.rejects(
     async () => {
       await mcp.handleCall("furlpay_sweep_treasury", { amountUsd: 1000.0, target: "HLP" });
     },
-    { message: /No signer configured/ }
+    { message: /Autonomous execution refused: no agent policy/ }
   );
 
   await assert.rejects(
@@ -303,7 +333,7 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
         leverage: 5,
       });
     },
-    { message: /No signer configured/ }
+    { message: /Autonomous execution refused: no agent policy/ }
   );
 
   // Call furlpay_get_hlp_yield

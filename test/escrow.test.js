@@ -13,16 +13,25 @@
 const { describe, it, beforeEach } = require("node:test");
 const assert = require("node:assert");
 const crypto = require("crypto");
-const { EscrowStateMachine } = require("../dist/settlement/escrow");
+const { ethers } = require("ethers");
+const {
+  EscrowStateMachine,
+  deliveryProofSigningMessage,
+} = require("../dist/settlement/escrow");
 
 describe("Escrow & Time-Locked Settlement Scheme (ETSS)", () => {
   let buyer = "0x1111111111111111111111111111111111111111";
-  let seller = "0x2222222222222222222222222222222222222222";
+  let sellerWallet;
+  let seller;
   let arbiter = "0x3333333333333333333333333333333333333333";
   let attacker = "0x9999999999999999999999999999999999999999";
   let terms;
 
   beforeEach(() => {
+    // A real signing identity per test: proof verification is cryptographic,
+    // so the seller of record must be an address we can sign from.
+    sellerWallet = ethers.Wallet.createRandom();
+    seller = sellerWallet.address;
     terms = {
       escrowId: "escrow_test_8841",
       buyer,
@@ -37,7 +46,17 @@ describe("Escrow & Time-Locked Settlement Scheme (ETSS)", () => {
     };
   });
 
-  it("should successfully execute full happy path settlement lifecycle", () => {
+  async function signedProof(machine, wallet, overrides = {}) {
+    const proofHash = machine.getTerms().deliverySpecHash;
+    const signature = await wallet.signMessage(
+      deliveryProofSigningMessage(machine.getEscrowId(), proofHash)
+    );
+    // submittedAt deliberately zero: the machine must record the LEDGER
+    // clock, never trust the caller's timestamp (audit P6 backdate drain).
+    return { proofHash, signature, submittedAt: 0, ...overrides };
+  }
+
+  it("should successfully execute full happy path settlement lifecycle", async () => {
     const sm = new EscrowStateMachine(terms);
     assert.strictEqual(sm.getState(), "CREATED");
 
@@ -49,14 +68,12 @@ describe("Escrow & Time-Locked Settlement Scheme (ETSS)", () => {
     sm.startDelivery(seller);
     assert.strictEqual(sm.getState(), "DELIVERY_PENDING");
 
-    // 3. Seller submits proof
-    const proofHash = "0x" + crypto.createHash("sha256").update("delivered_file.zip").digest("hex");
-    sm.submitProof(seller, {
-      proofHash,
-      signature: "0x_seller_valid_sig",
-      submittedAt: Math.floor(Date.now() / 1000),
-    });
+    // 3. Seller submits proof — cryptographically signed over the
+    // pre-agreed delivery spec commitment.
+    sm.submitProof(seller, await signedProof(sm, sellerWallet));
     assert.strictEqual(sm.getState(), "PROOF_SUBMITTED");
+    // The backdated submittedAt:0 must have been discarded for the ledger clock.
+    assert.ok(sm.getDeliveryProof().submittedAt >= Math.floor(Date.now() / 1000) - 5);
 
     // 4. Buyer releases funds
     sm.release(buyer, "0x_payout_tx_456");
@@ -69,15 +86,50 @@ describe("Escrow & Time-Locked Settlement Scheme (ETSS)", () => {
     assert.strictEqual(logs[3].toState, "RELEASED");
   });
 
-  it("P1 Invariant: prevents double-spend or mutations once in terminal state", () => {
+  it("P6 Invariant: forged signatures, foreign hashes and backdated timestamps fail closed", async () => {
     const sm = new EscrowStateMachine(terms);
     sm.fund(buyer, "0x_fund_tx_123");
     sm.startDelivery(seller);
-    sm.submitProof(seller, {
-      proofHash: "0x" + "11".repeat(32),
-      signature: "0x_sig",
-      submittedAt: Math.floor(Date.now() / 1000),
+
+    // A random other wallet's valid signature is NOT the seller's.
+    const forger = ethers.Wallet.createRandom();
+    const forged = await signedProof(sm, forger);
+    assert.throws(() => sm.submitProof(seller, forged), /signature mismatch/);
+
+    // A well-formed but unforgeable-as-seller string is rejected outright.
+    const fakeSigProof = await signedProof(sm, sellerWallet, {
+      signature: "sim:local-cli-attestation:1",
     });
+    assert.throws(
+      () => sm.submitProof(seller, fakeSigProof),
+      /recovery failed|Invalid delivery proof signature/
+    );
+
+    // A hash that is not the pre-agreed delivery spec commitment is refused.
+    const wrongHash = "0x" + "ab".repeat(32);
+    const sigWrongHash = await sellerWallet.signMessage(
+      deliveryProofSigningMessage(sm.getEscrowId(), wrongHash)
+    );
+    assert.throws(
+      () => sm.submitProof(seller, { proofHash: wrongHash, signature: sigWrongHash, submittedAt: 0 }),
+      /Proof hash mismatch/
+    );
+
+    // Backdated auto-release: proof recorded at ledger clock, so a
+    // submittedAt of 0 must NOT authorize an immediate auto-release.
+    sm.submitProof(seller, await signedProof(sm, sellerWallet));
+    assert.throws(
+      () => sm.release(attacker, "0x_drain_tx"),
+      /Unauthorized release/
+    );
+    assert.strictEqual(sm.getState(), "PROOF_SUBMITTED");
+  });
+
+  it("P1 Invariant: prevents double-spend or mutations once in terminal state", async () => {
+    const sm = new EscrowStateMachine(terms);
+    sm.fund(buyer, "0x_fund_tx_123");
+    sm.startDelivery(seller);
+    sm.submitProof(seller, await signedProof(sm, sellerWallet));
     sm.release(buyer, "0x_payout_tx_456");
     assert.strictEqual(sm.getState(), "RELEASED");
 

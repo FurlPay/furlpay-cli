@@ -354,6 +354,54 @@ export class McpStdioServer {
     ];
   }
 
+  /**
+   * Estimate the USD notional a perp order would commit, for the agent
+   * policy gate. Live mid from the exchange when no explicit price — a gate
+   * that can't price the order must refuse, not guess.
+   */
+  private async estimateNotionalUsd(symbol: string | undefined, size: number, price?: number): Promise<number> {
+    if (typeof size !== "number" || !isFinite(size) || size <= 0) {
+      throw new Error("Perp order size must be a positive number.");
+    }
+    let px = price;
+    if (typeof px !== "number" || !isFinite(px) || px <= 0) {
+      const clean = (symbol || "").toUpperCase().replace(/-PERP$/i, "");
+      const mids = await this.hlClient.getAllMids();
+      const mid = mids[clean];
+      if (!mid || !isFinite(parseFloat(mid)) || parseFloat(mid) <= 0) {
+        throw new Error(
+          `Cannot price ${clean} for the agent policy gate — no live mid available. ` +
+            `Pass an explicit price, or use furlpay_preview_trade first.`
+        );
+      }
+      px = parseFloat(mid);
+    }
+    return Number((size * (px as number)).toFixed(2));
+  }
+
+  /**
+   * P1 gate (2026-11-16 audit): EVERY value-moving MCP tool runs through the
+   * same atomic policy ledger as the CLI — validate + record under the policy
+   * lock. No agent policy loaded = autonomous execution refused outright: an
+   * MCP client that never configured a mandate must never be able to move
+   * money, and the old code executed live perp orders and vault sweeps with
+   * no gate at all (sweep even defaulted to 450 USDC when no amount was
+   * passed).
+   */
+  private requirePolicyGate(amountUsd: number, assetCode: string): void {
+    if (!this.agentKeyService.loadAgentPolicy(this.agentName)) {
+      throw new Error(
+        `Autonomous execution refused: no agent policy named "${this.agentName}" is configured. ` +
+          `Create one with \`furlpay wallet agent-keygen\` and start the server with ` +
+          `\`furlpay mcp --wallet ${this.agentName}\`; an unconfigured MCP server never moves value.`
+      );
+    }
+    const gate = this.agentKeyService.validateAndRecordSpend(this.agentName, amountUsd, assetCode);
+    if (!gate.allowed) {
+      throw new Error(`Mutation rejected by agent policy: ${gate.reason}`);
+    }
+  }
+
   async handleCall(name: string, args: any): Promise<any> {
     const loadedAgent = this.agentKeyService.loadAgentPolicy(this.agentName);
     const policy = loadedAgent?.policy;
@@ -392,10 +440,17 @@ export class McpStdioServer {
       }
 
       case "furlpay_sweep_treasury": {
-        const amt = args.amountUsd || 450.0;
+        // No fabricated default: a missing amount is a refused call, never
+        // an invented 450 USDC treasury decision (audit P1).
+        const amt = args.amountUsd;
+        if (typeof amt !== "number" || !isFinite(amt) || amt <= 0) {
+          throw new Error("furlpay_sweep_treasury requires a positive amountUsd.");
+        }
         const target = (args.target || "HLP").toUpperCase();
 
         if (target === "HLP") {
+          // Real signed vault transfer — gated by the agent policy.
+          this.requirePolicyGate(amt, "USDC");
           const res = await this.hlpService.deposit(amt);
           return {
             status: "SUCCESS",
@@ -456,6 +511,10 @@ export class McpStdioServer {
 
       case "furlpay_trade_perp":
       case "furlpay_execute_trade": {
+        // LIVE signed L1 order — policy-gated on full notional exposure
+        // (margin is what you post; notional is what you risk).
+        const notionalUsd = await this.estimateNotionalUsd(args.symbol, args.size, args.price);
+        this.requirePolicyGate(notionalUsd, "USDC");
         return await this.perpService.executePerpOrder({
           symbol: args.symbol,
           side: args.side,
