@@ -65,6 +65,26 @@ test("signal gate: non-toxic tape alongside a short-ready book passes", () => {
   assert.match(out.verdict, /SHORT-READY/);
 });
 
+test("signal gate: funding dimension joins the composite (HFT-V2 §5/§9)", () => {
+  // Calm funding → new signal row passes; verdict unaffected.
+  const calm = shortSignalCheck({ book: BOOK_SHORT_READY, fundingPer8h: 0.0001 });
+  assert.strictEqual(calm.ok, true);
+  const calmRow = calm.signals.find((s) => s.signal === "funding-not-in-cascade");
+  assert.strictEqual(calmRow.passed, true);
+  assert.match(calm.verdict, /SHORT-READY/);
+  assert.match(calm.disclaimer, /no sniping edge|undiscounted/);
+
+  // Spike funding (≥5bp/8h) + the ask wall already present → CASCADE-LIKELY,
+  // the funding row fails, and the verdict flips to NOT-READY (squeeze risk).
+  const spike = shortSignalCheck({ book: BOOK_SHORT_READY, fundingPer8h: 0.0006 });
+  assert.strictEqual(spike.ok, true);
+  const spikeRow = spike.signals.find((s) => s.signal === "funding-not-in-cascade");
+  assert.strictEqual(spikeRow.passed, false);
+  assert.strictEqual(spike.cascadeRegime.regime, "CASCADE-LIKELY");
+  assert.match(spike.verdict, /NOT-READY/);
+  assert.ok(spike.reasons.some((r) => r.includes("WARNING: funding spike")));
+});
+
 test("signal gate: missing book fails closed", () => {
   assert.strictEqual(shortSignalCheck({}).ok, false);
   assert.match(shortSignalCheck({}).reason, /book/);

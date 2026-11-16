@@ -387,7 +387,14 @@ function normalize(url) {
   return /^https?:\/\//.test(url) ? url : "http://" + url;
 }
 
-main().catch((e) => {
-  console.error(c.red("✗ " + e.message));
-  process.exit(1);
-});
+// Exit-code propagation: dispatch handlers return a number when they want a
+// specific process exit code (fail-closed surfaces return 1). Object/array
+// returns are payload values, not exit codes — only numbers > 0 set it.
+main()
+  .then((code) => {
+    if (typeof code === "number" && code > 0) process.exitCode = code;
+  })
+  .catch((e) => {
+    console.error(c.red("✗ " + e.message));
+    process.exit(1);
+  });
