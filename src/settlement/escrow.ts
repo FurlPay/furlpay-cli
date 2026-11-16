@@ -14,6 +14,7 @@
 
 import * as crypto from "crypto";
 import { ethers } from "ethers";
+import { ArbitrationPanel, verifyQuorum, ArbitrationDecision } from "./escrowArbitration";
 
 /**
  * Canonical message a seller signs to authenticate a delivery proof:
@@ -39,6 +40,12 @@ export interface EscrowTerms {
   buyer: string;
   seller: string;
   arbiter?: string;
+  /**
+   * M-of-N arbitration panel (2026-11-17 audit Module 1). When present, a
+   * DISPUTED escrow can only be resolved by `resolveDispute` with a quorum
+   * of distinct arbiter signatures — a single arbiter opinion settles nothing.
+   */
+  arbitrationPanel?: ArbitrationPanel;
   amount: string; // Atomic integer or decimal string
   token: string;
   network: string;
@@ -230,6 +237,18 @@ export class EscrowStateMachine {
     }
 
     const now = currentTimestampSeconds || Math.floor(Date.now() / 1000);
+
+    // Time-lock invariant (2026-11-17 audit V3): once the escrow clock passes
+    // the deadline, the refund path OWNS the collateral — a release after
+    // expiry would pay the seller over a refundable escrow. The boundary is
+    // inclusive: at t = expiry the funds are already refundable.
+    if (now >= this.terms.expiryTimestamp) {
+      throw new Error(
+        `Time-lock invariant violated: the escrow expired at ${this.terms.expiryTimestamp} ` +
+          `(now ${now}) — collateral is refundable, not releasable. Use the refund path.`
+      );
+    }
+
     const isBuyer = actor.toLowerCase() === this.terms.buyer.toLowerCase();
     const isArbiter = this.terms.arbiter && actor.toLowerCase() === this.terms.arbiter.toLowerCase();
 
@@ -294,6 +313,62 @@ export class EscrowStateMachine {
 
     this.settlementTxHash = refundTxHash;
     this.recordTransition("REFUNDED", actor, "Escrow collateral refunded back to buyer", refundTxHash);
+  }
+
+  /**
+   * 8. Arbiter-panel resolution of a DISPUTED escrow (audit Module 1).
+   *
+   * A DISPUTED escrow is a dead-end without this: only an M-of-N quorum of
+   * DISTINCT panel-member signatures over the canonical resolution message
+   * can move it — to RELEASED ('release') or REFUND_PENDING ('refund').
+   * Below quorum, with non-panel signers, or outside DISPUTED, it fails
+   * closed and the dispute stays open. The resolution nonce binds every
+   * signature to one vote round: votes cannot be replayed across outcomes.
+   */
+  resolveDispute(
+    decision: ArbitrationDecision,
+    signatures: string[],
+    resolutionNonce: string,
+    opts: { releaseTxHash?: string; reason?: string } = {}
+  ): { quorumAchieved: number; quorumRequired: number; verifiedArbitrators: string[] } {
+    if (this.state !== "DISPUTED") {
+      throw new Error(`Invalid state transition: arbitration resolves a DISPUTED escrow only (state is '${this.state}').`);
+    }
+    const panel = this.terms.arbitrationPanel;
+    if (!panel) {
+      throw new Error(
+        "This escrow has no arbitration panel in its terms — disputes cannot be resolved " +
+          "by quorum. Create escrows with `arbitrationPanel` to enable M-of-N resolution."
+      );
+    }
+    const quorum = verifyQuorum(this.terms.escrowId, decision, resolutionNonce, signatures, panel);
+    if (!quorum.ok) {
+      throw new Error(quorum.reason);
+    }
+
+    if (decision === "release") {
+      if (!opts.releaseTxHash) {
+        throw new Error("A 'release' arbitration decision requires releaseTxHash — the settlement transaction is never invented.");
+      }
+      this.settlementTxHash = opts.releaseTxHash;
+      this.recordTransition(
+        "RELEASED",
+        `arbitration:${quorum.verifiedArbitrators.length}-of-${panel.arbitrators.length}`,
+        opts.reason ?? "Arbiter panel quorum voted to release collateral to seller",
+        opts.releaseTxHash
+      );
+    } else {
+      this.recordTransition(
+        "REFUND_PENDING",
+        `arbitration:${quorum.verifiedArbitrators.length}-of-${panel.arbitrators.length}`,
+        opts.reason ?? "Arbiter panel quorum voted to refund collateral to buyer"
+      );
+    }
+    return {
+      quorumAchieved: quorum.quorumAchieved,
+      quorumRequired: quorum.quorumRequired,
+      verifiedArbitrators: quorum.verifiedArbitrators,
+    };
   }
 
   /**
