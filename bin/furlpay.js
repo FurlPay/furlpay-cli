@@ -75,6 +75,10 @@ ${c.bold("Quantitative Algo Engines (offline analysis over supplied data — pla
   algo funding                                   Funding persistence z-score + honest carry math
   algo cascade                                   Liquidation-cascade regime flag (analysis only)
 
+${c.bold("Live Terminal (real Hyperliquid WebSocket feed — data only, never executes)")}
+  live <SYM>                                     Interactive L2 book + OBI/microprice/VPIN gauges + hotkeys
+                                                 (--once --no-connect for a headless frame snapshot)
+
 ${c.bold("Binance Spot (credentials from env only; withdrawals structurally absent)")}
   binance balances                               Spot account balances (testnet/mainnet via FURLPAY_BINANCE_ENV)
   binance ticker <SYM>                           24h ticker for a symbol
@@ -238,6 +242,11 @@ async function main() {
     // ---- quantitative algo engines (offline analysis; plans & verdicts, no execution) ----
     case "algo":
       return require("../lib/algoCommands").run({ subcommand: args[0], args: args.slice(1), flags });
+
+    // ---- LIVE interactive trade terminal (real Hyperliquid WebSocket feed).
+    //      Distinct from `furlpay terminal` (the existing Stellar TUI dashboard).
+    case "live":
+      return require("../lib/liveTerminalCommands").run({ args, flags });
 
     // ---- Bitcoin shorting (mechanism registry + signal-gated readiness) ----
     case "short":
