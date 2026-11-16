@@ -53,6 +53,7 @@ export default defineConfig({
             { text: "Tokenized Stocks & RWAs", link: "/guide/rwa" },
             { text: "Binance Spot", link: "/guide/binance" },
             { text: "Market Data & Microstructure", link: "/guide/market-data" },
+            { text: "Quantitative Algo Engines", link: "/guide/algorithms" },
             { text: "Fork Assets & Replay Risk", link: "/guide/forks" },
           ],
         },

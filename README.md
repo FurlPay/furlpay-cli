@@ -510,7 +510,7 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 }
 ```
 
-### Exposed MCP Tools (25 total — read-only research + policy-gated execution):
+### Exposed MCP Tools (28 total — read-only research + policy-gated execution):
 
 **Fork asset operations (read-only):**
 - `fork_list_networks` / `fork_inspect_network` / `fork_replay_check`: declared fork registry and offline replay-risk audits (BTCB2, BTC1, ECX).
@@ -519,6 +519,13 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 - `microstructure_analytics`: exponentially-weighted OBI + Stoikov microprice over a supplied depth snapshot (integer-minor).
 - `microstructure_vpin`: Easley/López de Prado/O'Hara order-flow toxicity over a supplied trade tape (fixed-volume buckets, trailing partial excluded per the model).
 - `microstructure_quotes`: Avellaneda-Stoikov reservation price + optimal bid/ask for an inventory position.
+
+**Quantitative algo engines (read-only research — HFT-V2 report §4/§7/§9):**
+- `algo_glft_quotes`: Guéant–Lehalle–Fernandez-Tapia closed-form quotes — total spread δa+δb = γσ²τ + (2/γ)ln(1+γ/k) around the inventory-skewed reservation, with GLFT fill probability e^(−kδ). The deployable quoting frontier per the 2026 literature; adds the ½γσ²τ vol term the AS variant omits.
+- `algo_breakeven`: maker ship/no-ship arithmetic — E[PnL/h] = λ(δ − a − c) − ½γσ²q² in bps. Verdicts follow the sign of the arithmetic, never optimism.
+- `algo_cascade`: liquidation-cascade regime composite (funding spike + ask-wall OBI + toxic VPIN). Analysis only — the response itself carries the correction that undiscounted-book liquidations leave no sniping edge (HFT-V2 §5).
+
+**Policy-gated execution:**
 - `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps). Responses are explicitly labeled `SIMULATED` / `LOCAL_SIMULATION` in this build.
 - `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban (labeled simulated) or Hyperliquid HLP (real signed vault transfer).
 - `furlpay_trade`: Execute limit orders, path payments, or AMM swaps with delegated budget enforcement on Stellar.
@@ -642,6 +649,7 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | Binance spot adapter (signed requests, balances, orders) | **IMPLEMENTED, TESTNET-BLOCKED** | Full unit battery against stubbed transport (14 tests: signing determinism, secret redaction, env separation, error surfacing, gate ordering); live/testnet end-to-end requires API credentials with withdrawals disabled. Exchange errors surface code+message+HTTP status — never a synthetic success. |
 | Sweep artifact utilities (`fork simulate/psbt-inspect/opreturn/taint-plan`) | **IMPLEMENTED (Phase 2, offline)** | Slippage simulator over a *supplied* depth snapshot (integer minor math, deterministic, depth+cap refusals); BIP-174 PSBT wire inspector; BTC1 OP_RETURN barrier builder (≥83B enforced, PUSHDATA2); BTCB2 per-output taint plans. All artifacts are review-only — never broadcast. Live venue data: NOT IMPLEMENTED (no venue adapter). |
 | Market microstructure analytics (`microstructure analytics/vpin/quotes`) | **IMPLEMENTED (offline)** | Exponentially-weighted OBI, Stoikov microprice, Easley-VPIN, Avellaneda-Stoikov reservation quotes — the four canonical HFT indicators, pure math over a *supplied* depth snapshot or trade tape. No live feed in this build; the WebSocket engine feeds these same functions when it ships. Formulas: Easley/López de Prado/O'Hara (VPIN), Stoikov (micro-price), Avellaneda-Stoikov (reservation). |
+| Quantitative algo engines (`furlpay algo quotes/schedule/report/breakeven/queue/funding/cascade`; MCP `algo_glft_quotes`/`algo_breakeven`/`algo_cascade`) | **IMPLEMENTED (offline analysis)** | HFT-V2 research §4/§7/§9 realized as pure engines: GLFT closed-form quotes (adds the ½γσ²τ vol term AS omits), micro-TWAP/POV schedulers (seeded-reproducible, BigInt-exact reconciliation, plans never placed), Implementation-Shortfall scorecards vs arrival price, maker breakeven λ(δ−a−c)−½γσ²q², fluid queue-position estimates, funding persistence z-scores, and the cascade composite (which carries the no-sniping correction). Schedules are PLANS; verdicts are arithmetic — nothing signs, places or broadcasts, and no live edge is ever claimed. |
 | Fork asset operations (`fork networks/inspect/eligibility`) | **IMPLEMENTED (Phase 1, read-only)** | Offline replay-risk audit + declared registry (BTCB2, BTC1, ECX — unverified-declaration). Phase-3 surfaces (market, simulate, plan, liquidate, settlement) refuse with NOT_IMPLEMENTED — nothing simulated. MCP: fork_list_networks / fork_inspect_network / fork_replay_check (read-only). |
 | x402 settlement (`x402 pay`, MCP `furlpay_settle_invoice`) | **SIMULATED** | No live TigerBeetle facilitator in this build; responses say `SIMULATED` / `LOCAL_SIMULATION` |
 | Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build. SEP-8: `rwa kyc` reports `NOT_IMPLEMENTED` (exit 1), and regulated-asset trade results carry `sep8Status: "not_performed"` — compliance is never claimed. Registry carries no hardcoded APY and no invented approval-server URLs. |

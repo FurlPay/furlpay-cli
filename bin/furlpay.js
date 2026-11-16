@@ -66,6 +66,15 @@ ${c.bold("Hyperliquid L1 Trading & Perpetuals")}
   earn hlp [stats|deposit|withdraw]              Deposit idle USDC into HLP vault (4-day lockup)
   market <SYM> [--size <sz>]                     Depth-weighted micro-price, OFI & slippage estimates
 
+${c.bold("Quantitative Algo Engines (offline analysis over supplied data — plans & verdicts, never execution)")}
+  algo quotes                                    GLFT closed-form quotes (--mid --gamma --sigma --kappa)
+  algo schedule                                  micro-TWAP / POV execution plan (plan only — nothing placed)
+  algo report                                    Implementation Shortfall vs arrival price scorecard
+  algo breakeven                                 Maker ship/no-ship arithmetic (E[PnL/h] = λ(δ−a−c) − carry)
+  algo queue                                     Fluid queue-position / fill-probability estimate
+  algo funding                                   Funding persistence z-score + honest carry math
+  algo cascade                                   Liquidation-cascade regime flag (analysis only)
+
 ${c.bold("Binance Spot (credentials from env only; withdrawals structurally absent)")}
   binance balances                               Spot account balances (testnet/mainnet via FURLPAY_BINANCE_ENV)
   binance ticker <SYM>                           24h ticker for a symbol
@@ -225,6 +234,10 @@ async function main() {
     // ---- market microstructure analytics (offline, supplied book) ----------
     case "microstructure":
       return require("../lib/microstructureCommands").run({ subcommand: args[0], args: args.slice(1), flags });
+
+    // ---- quantitative algo engines (offline analysis; plans & verdicts, no execution) ----
+    case "algo":
+      return require("../lib/algoCommands").run({ subcommand: args[0], args: args.slice(1), flags });
 
     // ---- Bitcoin shorting (mechanism registry + signal-gated readiness) ----
     case "short":
