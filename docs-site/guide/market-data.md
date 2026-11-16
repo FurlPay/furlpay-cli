@@ -11,6 +11,32 @@ furlpay market BTC                # L2 book, depth bands, OFI, micro-price
 furlpay market BTC --slippage 0.5 --side buy
 ```
 
+## Live trade terminal (`furlpay live <SYM>`)
+
+The interactive terminal over the **real Hyperliquid WebSocket** (`l2Book` + `trades` channels) — the [HFT-V2 report](https://github.com/FurlPay/furlpay-cli/blob/main/HFT_V2_Advanced_Algorithms_Live_Research_Report.md) §9 P0 #1 surface:
+
+```bash
+# Interactive: L2 book + gauges + hotkeys, 4 FPS alt-screen render
+furlpay live BTC
+
+# With GLFT reservation quotes and the cascade regime on-screen
+furlpay live BTC --gamma 0.1 --sigma 0.02 --kappa 1.5 --funding 0.0002
+
+# Headless single-frame diagnostics (CI-safe, no socket, no TTY)
+furlpay live BTC --once --no-connect
+```
+
+What's on screen:
+
+- **Order book** — top-of-book depth in integer minors, spread bar
+- **Gauges** — OBI (ask-wall/bid-wall/balanced), Stoikov micro-price (below/above mid), **rolling VPIN** over the live trade tape (bucket configurable via `--vpin-bucket`), optional cascade regime and GLFT reservation
+- **Execution log** — millisecond-stamped local events (connect, feed regression, resync, panics)
+- **Hotkeys** — `q`/`Esc`/`Ctrl-C` quit (alt-screen leave, scrollback preserved); `r` honest resync (re-subscribe — HL pushes full books, a fresh subscription *is* the resync); `Space` PANIC
+
+::: warning Feed discipline & panic honesty
+An l2Book push whose timestamp regresses **freezes the book** (STALE) — an old book is never rendered as current; disconnect renders DISCONNECTED, never a fake book. The terminal never places, signs or broadcasts: `[Space]` prints the signed kill-switch command, and only spawns the real `furlpay trading kill-switch` subprocess with explicit `--allow-panic` — that command still runs the risk engine and fails closed without a signer.
+:::
+
 ## Microstructure analytics (offline, supplied data)
 
 ```bash

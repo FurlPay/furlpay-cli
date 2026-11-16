@@ -5,6 +5,7 @@ Every execution surface in this CLI is **labeled at runtime**. This table is the
 | Surface | Status | Notes |
 |---|---|---|
 | Hyperliquid market data (`market`, `hyperliquid markets/status`) | **LIVE** | Real `/info` responses from Hyperliquid validators |
+| Live trade terminal (`furlpay live <SYM>`) | **LIVE (data) + LOCAL (render)** | Real Hyperliquid WebSocket (`l2Book` + `trades`) through the streaming state machines: feed regression freezes the book (never renders stale as current), disconnect renders DISCONNECTED — never a fake book. Gauges (OBI, micro-price, rolling VPIN, optional GLFT quotes) computed on the live feed. The terminal NEVER places, signs or broadcasts: [Space] PANIC prints the signed kill-switch command and only spawns it with `--allow-panic` (that command still runs the risk engine and fails closed without a signer) |
 | Transaction verification (`tx verify`) | **LIVE (lookup)** | Real Horizon `GET /transactions/{hash}`; distinguishes confirmed-success / confirmed-failed / not-found / invalid / unavailable; explicitly an API lookup, never claimed as cryptographic re-verification |
 | Testnet faucet (`faucet`) | **LIVE** | Real Friendbot funding on testnet/futurenet only (mainnet refused); `FUNDED` requires the Friendbot's own successful response + independent Horizon balance check |
 | Config validation (`config validate`) | LOCAL | Structural checks on the local config; no network calls |
