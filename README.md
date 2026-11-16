@@ -3,11 +3,12 @@
 FurlPay CLI — Stellar Tokenized Equities & RWAs, SDEX/Soroban Trading, Binance Spot, Hyperliquid Perps, x402 Micropayments & MCP Server.
 
 [![npm](https://img.shields.io/npm/v/%40furlpay%2Fcli?logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@furlpay/cli)
+[![Docs](https://img.shields.io/badge/docs-live-00E6B8?logo=vitepress&logoColor=black)](https://furlpay.github.io/furlpay-cli/)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ES2022-3178C6?logo=typescript&logoColor=white)](src/index.ts)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol_26-black?logo=stellar&logoColor=white)](https://stellar.org)
 [![Hyperliquid](https://img.shields.io/badge/Hyperliquid-L1_perps-97CE43)](https://hyperliquid.xyz)
-[![Binance](https://img.shields.io/badge/Binance-Spot_+_Futures-F0B90B?logo=binance&logoColor=black)](#binance-exchange-integration)
+[![Binance](https://img.shields.io/badge/Binance-Spot-F0B90B?logo=binance&logoColor=black)](#binance-exchange-integration)
 [![MCP](https://img.shields.io/badge/MCP-server_mode-6E56CF?logo=anthropic&logoColor=white)](#model-context-protocol-mcp-ai-agents)
 [![tests](https://img.shields.io/badge/tests-node:test-green?logo=githubactions&logoColor=white)](test/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](../../LICENSE)
@@ -19,6 +20,35 @@ npm install -g @furlpay/cli
 furlpay wallet connect ledger
 furlpay trade terminal --pair JQQQ/USDC
 ```
+
+## Live Documentation
+
+**📖 https://furlpay.github.io/furlpay-cli/** — the full docs site (VitePress, auto-deployed from `main` on every change to `docs-site/`).
+
+| Section | What's in it |
+|---|---|
+| [Getting Started](https://furlpay.github.io/furlpay-cli/guide/getting-started) | Requirements, first five commands, the two-plane mental model, where data lives |
+| [Installation](https://furlpay.github.io/furlpay-cli/guide/installation) | npm / curl / PowerShell / npx / offline tarballs, updates, uninstall |
+| [Authentication](https://furlpay.github.io/furlpay-cli/guide/authentication) | RFC 8628 device login, headless OTP, why keys are never argv |
+| [Configuration & Diagnostics](https://furlpay.github.io/furlpay-cli/guide/configuration) | `config validate`, `doctor`, `tx verify` semantics, faucet |
+| [A2A Payments](https://furlpay.github.io/furlpay-cli/guide/payments) | The quote-bound, consent-first payment flow; outcome classification |
+| [Escrow (ETSS)](https://furlpay.github.io/furlpay-cli/guide/escrow) | Lifecycle, cryptographic proof verification, fail-closed modes |
+| [x402 Micropayments](https://furlpay.github.io/furlpay-cli/guide/x402) | Challenge settlement (labeled simulated), replay ledger, agent gating |
+| [Hyperliquid Perps & HLP](https://furlpay.github.io/furlpay-cli/guide/hyperliquid) | Signer setup, risk engine, live trading, the 4-day-lockup vault |
+| [Bitcoin Shorting](https://furlpay.github.io/furlpay-cli/guide/shorting) | Live short execution, mechanism registry, signal research |
+| [Stellar Wallets & SDEX](https://furlpay.github.io/furlpay-cli/guide/stellar) | Five custody options, issuer validation, trading surface |
+| [Tokenized Stocks & RWAs](https://furlpay.github.io/furlpay-cli/guide/rwa) | Catalog, what the CLI refuses to fake (SEP-8, issuers, APY) |
+| [Binance Spot](https://furlpay.github.io/furlpay-cli/guide/binance) | Credentials from env, capability status, body-signed requests |
+| [Market Data & Microstructure](https://furlpay.github.io/furlpay-cli/guide/market-data) | Live books, the four HFT indicators, streaming engine |
+| [Fork Assets & Replay Risk](https://furlpay.github.io/furlpay-cli/guide/forks) | Read-only fork registry and audits |
+| [MCP AI Agents](https://furlpay.github.io/furlpay-cli/guide/agents) | Spend policies, the mandate lifecycle, prompt-injection defense |
+| [CLI Command Reference](https://furlpay.github.io/furlpay-cli/reference/cli) | Every command, one table per group |
+| [Environment Variables](https://furlpay.github.io/furlpay-cli/reference/environment) | Every variable the CLI reads + the hygiene rules it enforces |
+| [Honesty Matrix](https://furlpay.github.io/furlpay-cli/reference/honesty-matrix) | Live vs. simulated, per surface — the authoritative table |
+| [Security Model](https://furlpay.github.io/furlpay-cli/reference/security) | Dual-plane architecture, threat table, money-math integrity |
+| [Regulatory Overview](https://furlpay.github.io/furlpay-cli/compliance/regulatory) | Licensing matrix across US/EU/UK/SG (full report below in this README) |
+| [Compliance Invariants](https://furlpay.github.io/furlpay-cli/compliance/invariants) | The five non-negotiables + engineering corollaries |
+| [Use Cases](https://furlpay.github.io/furlpay-cli/use-cases) | Eight end-to-end workflows: payouts, first trade, agent wallets, escrow, forks, yield, verification, research |
 
 ---
 

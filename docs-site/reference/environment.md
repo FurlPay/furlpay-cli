@@ -1,0 +1,42 @@
+# Environment Variables
+
+Secrets live in environment variables or stdin — **never as CLI arguments** (argv is visible in process listings and shell history). Variables without the `NEXT_PUBLIC_` style prefix never reach any client bundle; they are read only by the local process.
+
+## Signing keys
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `HYPERLIQUID_PRIVATE_KEY` | Perp execution, HLP vault | Preferred. Fails closed if absent on signed surfaces. Use a delegated **API Agent key**, not your master |
+| `ETH_PRIVATE_KEY` | Perp execution, HLP vault | Fallback signer |
+| `FURLPAY_HL_TESTNET` | Hyperliquid | `1` = testnet, `0` = mainnet — explicit, never silently swapped |
+
+## Exchange credentials
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `BINANCE_API_KEY` | Binance spot | Create with spot trading enabled, **withdrawals disabled**, IP-bound |
+| `BINANCE_API_SECRET` | Binance spot | HMAC-SHA256 signing, `recvWindow` enforced |
+| `FURLPAY_BINANCE_ENV` | Binance | `testnet` or `mainnet` — distinct constants, never silently swapped |
+
+## Stellar
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `STELLAR_NETWORK` | Stellar services | `PUBLIC` / `TESTNET` / `FUTURENET` — canonical passphrases validated by `config validate` |
+| `HORIZON_URL` | Horizon lookups | e.g. `https://horizon.stellar.org` |
+
+## Terminal & CLI behavior
+
+| Variable | Notes |
+|---|---|
+| `NO_COLOR` | Presence (any value, including `0` or empty) disables all color |
+| `COLORTERM`, `TERM`, `WT_SESSION` | Color-level detection (truecolor / 256 / 16) |
+| `NODE_ENV`, `FURLPAY_ENV` | Environment hints; `production`/`live` gates sandbox fixtures |
+
+## Hygiene rules the CLI enforces
+
+- **Argv secrets are refused** — mnemonics/keys on stdin only (`wallet import`, `login --key`).
+- **Terminal echo is suppressed** for interactive seed-phrase/key input.
+- The session cookie attaches **only** to `furlpay.com` over TLS or loopback — pointing `--api-base` elsewhere sends the request credential-less and says so.
+- Cleartext `http://` is refused for remote targets, and refused even on loopback when the environment is `live`.
+- URLs with embedded credentials (`https://user:pass@host`) are refused outright.

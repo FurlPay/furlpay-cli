@@ -8,3 +8,7 @@ dist/
 !.env.example
 .DS_Store
 Thumbs.db
+
+# VitePress docs build artifacts
+/docs-site/.vitepress/dist/
+/docs-site/.vitepress/cache/
