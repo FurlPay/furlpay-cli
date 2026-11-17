@@ -21,6 +21,7 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/getting-started", activeMatch: "/guide/" },
       { text: "Reference", link: "/reference/cli", activeMatch: "/reference/" },
+      { text: "Examples", link: "/examples/index", activeMatch: "/examples/" },
       { text: "Use Cases", link: "/use-cases", activeMatch: "/use-cases" },
       { text: "Research", link: "/research/index", activeMatch: "/research/" },
       { text: "Compliance", link: "/compliance/regulatory", activeMatch: "/compliance/" },
@@ -61,6 +62,7 @@ export default defineConfig({
           text: "Automation",
           items: [
             { text: "MCP AI Agents", link: "/guide/agents" },
+            { text: "Platform API Integration", link: "/guide/platform-api-integration" },
           ],
         },
       ],
@@ -69,9 +71,24 @@ export default defineConfig({
           text: "Reference",
           items: [
             { text: "CLI Command Reference", link: "/reference/cli" },
+            { text: "Command Index", link: "/reference/command-index" },
+            { text: "MCP Tool Reference", link: "/reference/mcp-tools" },
             { text: "Environment Variables", link: "/reference/environment" },
+            { text: "Architecture", link: "/reference/architecture" },
             { text: "Honesty Matrix", link: "/reference/honesty-matrix" },
             { text: "Security Model", link: "/reference/security" },
+            { text: "Troubleshooting", link: "/reference/troubleshooting" },
+          ],
+        },
+      ],
+      "/examples/": [
+        {
+          text: "Examples",
+          items: [
+            { text: "All Recipes (index)", link: "/examples/index" },
+            { text: "Setup, Wallets & Agents (1–10)", link: "/examples/setup" },
+            { text: "Trading & Market Data (11–18)", link: "/examples/trading-and-data" },
+            { text: "Operations & Analysis (19–30)", link: "/examples/ops-and-analysis" },
           ],
         },
       ],

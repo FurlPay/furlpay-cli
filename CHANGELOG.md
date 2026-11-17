@@ -8,6 +8,38 @@ releases; patch releases are always safe to take.
 
 ## Unreleased
 
+Documentation system build-out (source-audited, nothing invented).
+
+### Added
+
+- **MCP tool reference** (`docs-site/reference/mcp-tools.md`) — both servers
+  (TS 35 / JS 29) with verified input schemas, required/optional properties,
+  read-only vs mutating classification, the two-phase protocol, and the
+  read-only-default semantics pinned by tests.
+- **Command index** (`docs-site/reference/command-index.md`) — all 63
+  top-level commands inventoried from the dispatchers, one line each.
+- **Platform API integration guide** (`docs-site/guide/platform-api-integration.md`)
+  — the three planes (hosted API / public chains / local engines), the hosted
+  endpoints the CLI actually calls, the payment-safety contract shared with
+  furlpay.com/docs, and the integrations deliberately marked not-implemented.
+- **Architecture page** (`docs-site/reference/architecture.md`) — Mermaid
+  diagrams of the dispatcher, plane boundaries, MCP gating, pre-trade risk,
+  oracle aggregation, x402 lifecycle and the escrow state machine.
+- **30 runnable examples** (`docs-site/examples/`) — setup/agents, trading,
+  ops/analysis; every command verified against source; real-funds recipes
+  carry explicit risk blocks; no fabricated output.
+- **Troubleshooting guide** — every designed refusal mapped to its cause.
+- `docs-site/reference/environment.md` is now the exhaustive env reference
+  (setup, precedence, rotation, redaction); corrected `HORIZON_URL` →
+  `STELLAR_HORIZON_URL` and removed `STELLAR_NETWORK` (a config-file concept,
+  not an env var); added the 5 source-read vars that were missing from
+  `.env.example` (`FURLPAY_LIVE`, `FURLPAY_ENV`, `HYPERLIQUID_WALLET_ADDRESS`,
+  `FURLPAY_FINANCE_WEBHOOK_URL`, `FURLPAY_FINANCE_APPROVER_TOKEN`).
+- `llms.txt` gains explicit AI-agent rules; VitePress nav gains Examples +
+  the new reference pages.
+
+
+
 Oracles & Solana live read-only surface (2026-11-17 gap report, Gaps 2 + 5).
 
 ### Added

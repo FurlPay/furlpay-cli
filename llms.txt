@@ -63,6 +63,15 @@ Read-only tools (always available):
 - LOCAL LEDGER: escrow (ETSS state machine), finance ledger
 - NOT IMPLEMENTED (refuses with NOT_IMPLEMENTED): fork market/plan/liquidate/settlement, Binance futures/OCO/websockets/withdrawals, Solana signing/broadcast (surface is read-only)
 
+## Rules for AI agents
+
+- Read-only by default: a fresh `furlpay mcp` exposes no value-moving tool. Never assume execution permissions exist.
+- Never invent payment completion: a quote, a preview, or a `SIMULATED` label is not a settlement. Verify the final transaction status and reference (`furlpay tx verify <hash>` for Stellar).
+- Never bypass Agent Trust: policies are enforced before signing, on stored amounts, under an OS file lock.
+- Never expose credentials: keys arrive via environment/stdin, never argv, never logs.
+- Never retry a value-moving operation without respecting idempotency and the transaction status the ledger reports.
+- Check rail availability (`/api/rails` semantics) before relying on a rail; stale or unavailable status is unknown, not healthy.
+
 ## Security invariants
 
 - A fresh `furlpay mcp` cannot move funds (read-only default, structural absence)
@@ -81,3 +90,9 @@ Read-only tools (always available):
 - docs/FORKS.md — fork asset operations, replay auditing, sweep artifacts
 - docs/MICROSTRUCTURE.md — the four indicators, data formats, precision contract
 - docs/INSTALLATION.md, docs/UPDATING.md, docs/RELEASING.md, docs/PACKAGING.md
+- docs-site/reference/mcp-tools.md — both MCP servers, every tool, schemas and gating
+- docs-site/reference/command-index.md — every top-level command, one line each
+- docs-site/reference/architecture.md — Mermaid diagrams of the real modules
+- docs-site/guide/platform-api-integration.md — hosted API vs local vs chain planes
+- docs-site/examples/ — 30 runnable recipes
+- docs-site/reference/troubleshooting.md — every designed refusal and its meaning
