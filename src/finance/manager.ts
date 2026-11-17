@@ -36,7 +36,7 @@ export class FinanceManager {
     this.ledger = new FinancialLedger(p("ledger.json"));
     this.spend = new SpendManager(this.ledger, p("limits.json"));
     this.approvals = new ApprovalEngine(p("approvals.json"));
-    this.payments = new PaymentOrchestrator(this.ledger, this.spend, this.approvals, 50_000_000n, (type, payload) => {
+    this.payments = new PaymentOrchestrator(this.ledger, this.spend, this.approvals, (type: string, payload: Record<string, unknown>) => {
       void this.events.emit(type as never, payload).catch(() => { /* journal already records */ });
     });
     this.treasury = new TreasuryManager(this.ledger);

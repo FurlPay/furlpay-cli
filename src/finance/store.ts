@@ -72,7 +72,35 @@ export function readJsonStore<T>(filePath: string): T | null {
  * Atomic write: unique temp file ("wx", mode 0600) then rename over the
  * target. Readers either see the complete previous file or the complete new
  * one — never a torn write.
+ *
+ * On Windows, rename over a file that another process momentarily has open
+ * (a concurrent reader, a scanner) fails with EPERM/EACCES/EBUSY even though
+ * nothing is wrong. The rename is retried briefly — the collision window is
+ * microseconds — before giving up (readiness P23 multi-process safety).
  */
+const RENAME_RETRYABLE = new Set(["EPERM", "EACCES", "EBUSY", "ENOTEMPTY"]);
+const RENAME_RETRIES = 12;
+const RENAME_BACKOFF_MS = 25;
+
+function renameWithRetry(from: string, to: string): void {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RENAME_RETRIES; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err: any) {
+      lastErr = err;
+      if (!err || !RENAME_RETRYABLE.has(err.code)) throw err;
+      try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RENAME_BACKOFF_MS * (attempt + 1));
+      } catch {
+        /* environments without Atomics.wait degrade to immediate retry */
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export function writeJsonStoreAtomic(filePath: string, data: unknown): void {
   ensureFinanceDir();
   assertRegularFile(filePath);
@@ -83,7 +111,7 @@ export function writeJsonStoreAtomic(filePath: string, data: unknown): void {
     fs.writeFileSync(fd, JSON.stringify(data, null, 2), { encoding: "utf8" });
     fs.closeSync(fd);
     fd = null;
-    fs.renameSync(tmp, filePath);
+    renameWithRetry(tmp, filePath);
   } catch (err: any) {
     throw new Error(`Finance store write failed (${filePath}): ${err?.message || err}`);
   } finally {

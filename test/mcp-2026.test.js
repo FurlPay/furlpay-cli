@@ -73,3 +73,32 @@ test("MCP 2026 Specification: TypeScript McpStdioServer enforces requiresUserInt
     );
   }
 });
+
+test("P23: MCP finance surface is inspection-only — no approve/create/limit/settle tool exists", () => {
+  const server = new McpStdioServer("test-agent");
+  const toolDefs = server.getToolDefinitions();
+  // P23 scope: the FINANCE money-authorization surface (approval engine,
+    // orchestrator, spend controls) is CLI-human-only. The x402 challenge
+    // tool (furlpay_settle_invoice) is a separate execution surface gated by
+    // agent policy — its further restriction is P7's job, not this guard's.
+    const FORBIDDEN = ["approve", "approval", "create_payment", "set_limit", "confirm", "cancel_payment"];
+  for (const def of toolDefs) {
+    const n = def.name.toLowerCase();
+    for (const bad of FORBIDDEN) {
+      assert(
+        !n.includes(bad),
+        `MCP tool ${def.name} must NOT exist — money-authorization verbs belong to the human CLI, never the agent surface (P23)`
+      );
+    }
+  }
+  // The finance tools that DO exist are read-only by annotation and honest about it.
+  const financeTools = toolDefs.filter((t) => t.name.startsWith("furlpay_finance"));
+  assert(financeTools.length >= 5, `finance inspection tools should exist (got ${financeTools.length})`);
+  for (const t of financeTools) {
+    assert.strictEqual(
+      t.annotations?.readOnlyHint ?? true,
+      true,
+      `Finance tool ${t.name} must be readOnlyHint (or omit destructive hints)`
+    );
+  }
+});

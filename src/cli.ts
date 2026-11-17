@@ -1542,6 +1542,7 @@ export class FurlPayStellarCli {
   // not have, and submission is never settlement.
   private async handleFinance(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
     const { FinanceManager } = await import("./finance/manager");
+    const { assertHumanApproval, HUMAN_APPROVAL_EXIT_CODE } = await import("./finance/humanGate");
     const money = await import("./finance/money");
     const fin = new FinanceManager({ webhookUrl: process.env.FURLPAY_FINANCE_WEBHOOK_URL?.trim() || undefined });
     const area = subcommand || args[0];
@@ -1698,12 +1699,36 @@ export class FurlPayStellarCli {
           const id = rest[0];
           const stored = fin.approvals.get(id ?? "");
           if (!stored) throw new Error(`Unknown approval ${id}`);
+          // HUMAN APPROVAL MUST BE HUMAN (readiness P23): either an
+          // interactive TTY with a typed challenge, or a separate approver
+          // credential (FURLPAY_FINANCE_APPROVER_TOKEN) presented via
+          // --approver. A non-interactive call with neither is refused with
+          // exit code 46 — a scripted call is not a human decision.
+          const gate = await assertHumanApproval(
+            { minor: stored.params.minor, destination: stored.params.destination },
+            {
+              isTty: process.stdout.isTTY === true,
+              approverToken: flags.approver ? String(flags.approver) : undefined,
+              expectedToken: process.env.FURLPAY_FINANCE_APPROVER_TOKEN?.trim(),
+              prompt: (question) => {
+                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                return new Promise<string>((res) => {
+                  rl.question(question, res);
+                  rl.close();
+                });
+              },
+            },
+          );
+          if (!gate.ok) {
+            console.error(`[!] ${gate.reason}`);
+            process.exitCode = HUMAN_APPROVAL_EXIT_CODE;
+            return;
+          }
           // The human approves the STORED parameters exactly as `inspect`
           // showed them — reconstructed verbatim so the hash matches the
-          // request (undefined stays undefined; "0" ≠ missing). The binding
-          // that catches parameter substitution runs again at execution time
-          // (consumeForExecution), where the orchestrator re-presents the
-          // LIVE transaction parameters.
+          // request. The binding that catches parameter substitution runs
+          // again at execution time (reserve/assertBinding), where the
+          // orchestrator re-presents the LIVE transaction parameters.
           const req = fin.approvals.approve(id, {
             minor: BigInt(stored.params.minor),
             unit: stored.params.unit,
@@ -1798,8 +1823,9 @@ export class FurlPayStellarCli {
           const txHash = String(flags["tx-hash"] ?? "");
           if (!txHash) throw new Error("--tx-hash with a REAL transaction hash is required — the ledger refuses fabricated references.");
           const submitted = fin.payments.markSubmitted(rest[0] ?? "", txHash);
-          const confirmed = fin.payments.markConfirmed(submitted.id, "evidence attached");
-          console.log(`[+] Payment ${confirmed.id} → ${confirmed.state} (evidence ${txHash.slice(0, 18)}…). Settle with: furlpay finance payment settle ${confirmed.id}`);
+          const confirmed = fin.payments.markConfirmed(submitted.id, "operator-asserted evidence attached");
+          console.log(`[+] Payment ${confirmed.id} → ${confirmed.state} (evidence ${txHash.slice(0, 18)}…, operator_asserted).`);
+          console.log(`[i] Settlement needs chain-verified evidence — a provider receipt check (destination, amount, success) is not wired in this build, so the payment stays CONFIRMED-unverified.`);
           return;
         }
         if (sub === "settle") {

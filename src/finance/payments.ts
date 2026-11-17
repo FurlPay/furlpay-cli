@@ -19,10 +19,11 @@
  */
 
 import * as crypto from "crypto";
-import { FinancialLedger, LedgerTxState } from "./ledger";
+import { FinancialLedger, LedgerTxState, validateDestination } from "./ledger";
 import { SpendManager } from "./spend";
 import { ApprovalEngine, ApprovalParams, ApprovalRequest } from "./approvals";
 import { MoneyAmount, formatMoney } from "./money";
+import { getCapability } from "../capabilities/registry";
 
 export type PaymentState = LedgerTxState;
 
@@ -39,6 +40,8 @@ export interface Payment {
   approvalId?: string;
   feeMinor?: string;
   txHash?: string;
+  /** How well txHash is known — only chain_verified may settle. */
+  evidenceLevel?: "operator_asserted" | "chain_verified";
   createdAt: string;
   updatedAt: string;
   audit: { at: string; event: string; detail?: string }[];
@@ -54,34 +57,82 @@ export interface SettlementCapability {
 
 const DEFAULT_TTL_MS = 10 * 60_000;
 
+/**
+ * Per-unit approval thresholds in MINOR units (readiness P23): a threshold
+ * is meaningless without knowing the decimals. Unknown units fail closed —
+ * they always require approval rather than guessing a scale.
+ */
+const APPROVAL_THRESHOLD_MINOR: Record<string, bigint> = {
+  USDC: 50_000_000n, // 50 USDC (6 dp)
+  USDT: 50_000_000n,
+  EURC: 50_000_000n,
+  USD: 5_000n, // $50 (2 dp)
+  EUR: 5_000n,
+  GBP: 5_000n,
+};
+
 export class PaymentOrchestrator {
   constructor(
     private readonly ledger: FinancialLedger,
     private readonly spend: SpendManager,
     private readonly approvals: ApprovalEngine,
-    private readonly requireApprovalAboveMinor: bigint = 50_000_000n, // $50 in USDC-minor by default
     private readonly emit?: (type: string, payload: Record<string, unknown>) => void,
   ) {}
+
+  /** Approval threshold for one unit; unknown unit → fail closed (always approve). */
+  private thresholdFor(unit: string): bigint | null {
+    return APPROVAL_THRESHOLD_MINOR[unit.toUpperCase()] ?? null;
+  }
 
   private fire(type: string, p: Payment): void {
     this.emit?.(type, { paymentLedgerTxId: p.ledgerTxId, state: p.state, amountMinor: p.amount.minor, unit: p.amount.unit, network: p.amount.network, destination: p.destination, at: p.updatedAt });
   }
 
-  /** Honest capability report — no invented adapters. */
+  /**
+   * Honest capability report — derived from the P1 capability registry by
+   * construction, never a parallel hardcoded list that can drift from it.
+   * Each payment rail maps to its registry surface; a rail with no
+   * registered settlement surface reports "none".
+   */
   settlementCapabilities(): SettlementCapability[] {
-    return [
-      { network: "stellar", mode: "simulated", note: "SDEX/path-payment submission is a labeled local simulation in this build; no broadcast" },
-      { network: "base", mode: "none", note: "no local settlement adapter; hosted flows or external evidence only" },
-      { network: "solana", mode: "none", note: "no local settlement adapter; hosted flows or external evidence only" },
-      { network: "ethereum", mode: "none", note: "no local settlement adapter; hosted flows or external evidence only" },
-      { network: "hyperliquid", mode: "none", note: "trading venue, not a payment rail" },
-    ];
+    // network → registry surface that would actually carry the settlement.
+    // Only stellar has one today (simulated); the rest are deliberately
+    // unregistered ids → "none". Hyperliquid is a trading venue, NOT a
+    // payment rail — its live perp-execution mode must never leak into a
+    // settlement capability report.
+    const SURFACE_BY_NETWORK: Record<string, string> = {
+      stellar: "stellar.path-payment",
+      base: "finance.payments.settlement.base",
+      solana: "finance.payments.settlement.solana",
+      ethereum: "finance.payments.settlement.ethereum",
+      hyperliquid: "finance.payments.settlement.hyperliquid",
+    };
+    const FALLBACK_NOTE: Record<string, string> = {
+      stellar: "SDEX/path-payment submission is a labeled local simulation in this build; no broadcast",
+      base: "no local settlement adapter; hosted flows or external evidence only",
+      solana: "no local settlement adapter; hosted flows or external evidence only",
+      ethereum: "no local settlement adapter; hosted flows or external evidence only",
+      hyperliquid: "trading venue, not a payment rail",
+    };
+    return Object.entries(SURFACE_BY_NETWORK).map(([network, surfaceId]) => {
+      const cap = getCapability(surfaceId);
+      // A registry mode of local/analysis is NOT a settlement rail — report
+      // "none" rather than dressing a tracker up as settlement.
+      const mode = cap && (cap.mode === "live" || cap.mode === "simulated") ? cap.mode : "none";
+      return {
+        network,
+        mode,
+        note: cap?.note ?? FALLBACK_NOTE[network],
+      };
+    });
   }
 
   /**
    * Create an outbound payment. Fail-closed on spend policy; requires a
-   * human-approved ApprovalRequest when the amount crosses the threshold.
-   * Idempotent on idempotencyKey.
+   * human-approved ApprovalRequest when amount+fee crosses the per-unit
+   * threshold. The execution sequence is binding-assert → reserve (CAS) →
+   * atomic commit (payment+fee together) → finalize; any failure releases
+   * the reservation and leaves the ledger byte-identical (readiness P23).
    */
   createOutPayment(input: {
     amount: MoneyAmount;
@@ -97,102 +148,182 @@ export class PaymentOrchestrator {
     approvalId?: string;
     counterpartyRef?: string;
   }): Payment | ApprovalRequest {
-    // Idempotency first: an existing record wins over any re-processing.
-    if (input.idempotencyKey) {
-      const existing = this.ledger.listTransactions().find((t) => t.idempotencyKey === input.idempotencyKey);
-      if (existing) return this.hydrate(existing.id);
-    }
-
     const amount = input.amount;
     const unit = amount.kind === "fiat" ? amount.currency : amount.asset;
     const network = amount.kind === "token" ? amount.network : undefined;
     const feeMinor = input.feeMinor ?? 0n;
 
-    // 1. Spend controls — the gate every surface must pass.
-    const decision = this.spend.check({ minor: amount.minor, unit, network, counterparty: input.destination });
+    // 0. Destination validation BEFORE anything is created — junk like
+    // GDEST123 on an EVM network is refused at the door.
+    validateDestination(input.destination, network);
+
+    // 1. Idempotency with a parameter fingerprint: the same key with
+    // DIFFERENT parameters is a conflict, not a silent success.
+    const fingerprint = JSON.stringify({
+      minor: amount.minor.toString(),
+      unit: unit.toUpperCase(),
+      network: network ?? null,
+      destination: input.destination.trim(),
+      source: input.sourceAccountId,
+      feeMinor: feeMinor.toString(),
+    });
+    if (input.idempotencyKey) {
+      const existing = this.ledger.listTransactions().find((t) => t.idempotencyKey === input.idempotencyKey);
+      if (existing) {
+        const existingFp = existing.audit.find((a) => a.event === "FINGERPRINT")?.detail;
+        if (existingFp && existingFp !== fingerprint) {
+          throw new Error(
+            `IDEMPOTENCY_CONFLICT: key ${input.idempotencyKey} was used for a DIFFERENT payment ` +
+              `(stored fingerprint differs). New payment refused — use a fresh key.`
+          );
+        }
+        // A dead original is SURFACED, never silently re-served as success
+        // (readiness P23): replaying a key against a cancelled/failed payment
+        // returns an error pointing at the original, so the caller knows the
+        // money did not move.
+        if (existing.state === "CANCELLED" || existing.state === "FAILED") {
+          throw new Error(
+            `IDEMPOTENCY_KEY_DEAD: key ${input.idempotencyKey} belongs to payment ${existing.id} ` +
+              `which is ${existing.state}. The original did not complete — create a NEW payment with a fresh key.`
+          );
+        }
+        return this.hydrate(existing.id);
+      }
+    }
+
+    // 2. Spend controls — amount AND fee consume budget (readiness P23).
+    const decision = this.spend.check({ minor: amount.minor + feeMinor, unit, network, counterparty: input.destination });
     if (!decision.allowed) {
       throw new Error(`SPEND_REFUSED: ${decision.reason}`);
     }
 
-    // 2. Approval when policy requires it — bound to the exact parameters.
+    // 3. Approval when amount+fee crosses the per-unit threshold; unknown
+    // units have NO threshold → always require approval (fail closed).
     const params: ApprovalParams = { minor: amount.minor, unit, network, destination: input.destination, source: input.sourceAccountId, type: "payment_out", feeMinor };
+    const threshold = this.thresholdFor(unit);
+    const needsApproval = threshold === null || amount.minor + feeMinor > threshold;
     let approvalId: string | undefined;
-    if (amount.minor > this.requireApprovalAboveMinor) {
+    let reservationToken: string | undefined;
+    if (needsApproval) {
       if (!input.approvalId) {
-        // No approval supplied: create the request and RETURN it — the caller
-        // must show it to a human. Money never moves past this point without
-        // a human-approved request id presented back here.
-        return this.approvals.create(params, { level: amount.minor > 100_000_000n ? "high" : "medium", notes: `outbound ${formatMoney(amount)} to ${input.destination}` });
+        const level = threshold !== null && amount.minor + feeMinor > threshold * 10n ? "high" : "medium";
+        return this.approvals.create(params, { level, notes: `outbound ${formatMoney(amount)} (+fee) to ${input.destination}` });
       }
-      // Consume BEFORE any ledger posting: the burned approval is the
-      // authorization. If posting then failed, the approval is spent (fail-
-      // closed) — never the reverse, which would post money against an
-      // approval that was never consumed.
-      this.approvals.consumeForExecution(input.approvalId, params, "pending");
+      // Pure binding assert FIRST — no writes on a mismatch. Advisory only —
+      // the authoritative check reruns inside reserveForExecution under the
+      // cross-process lock.
+      this.approvals.assertBinding(input.approvalId, params);
+      // CAS reservation: exactly one execution per approval. The owner token
+      // proves THIS execution won it; a concurrent loser holds no token and
+      // can neither finalize nor release our reservation.
+      const reservation = this.approvals.reserveForExecution(input.approvalId, params);
       approvalId = input.approvalId;
+      reservationToken = reservation.ownerToken;
     }
 
-    // 3. Ledger posting — balanced double-entry, CREATED state. Paying an
-    // external party: the source ASSET goes down (credit), the expense
-    // counterpart goes up (debit).
-    const tx = this.ledger.commit({
-      type: "payment_out",
-      state: "CREATED",
-      idempotencyKey: input.idempotencyKey,
-      refApprovalId: approvalId,
-      entries: [
-        { accountId: input.sourceAccountId, direction: "credit", minor: amount.minor, note: input.counterpartyRef ?? input.destination },
-        { accountId: input.counterAccountId, direction: "debit", minor: amount.minor },
-      ],
-    });
-    if (feeMinor > 0n) {
-      // Fees post as their own balanced transaction (fee expense up, source
-      // asset down) — separate tx so fee reports stay clean.
-      this.ledger.commit({
-        type: "fee",
-        state: "CREATED",
-        idempotencyKey: `${input.idempotencyKey ?? tx.id}:fee`,
-        entries: [
-          { accountId: input.feeAccountId ?? input.counterAccountId, direction: "debit", minor: feeMinor, note: "network fee" },
-          { accountId: input.sourceAccountId, direction: "credit", minor: feeMinor },
-        ],
-      });
-    }
+    // 4. ATOMIC ledger posting — payment and fee land together or not at all.
+    try {
+      const batch = this.ledger.commitMany([
+        {
+          type: "payment_out",
+          state: "CREATED",
+          idempotencyKey: input.idempotencyKey,
+          refApprovalId: approvalId,
+          refDestination: input.destination.trim(),
+          entries: [
+            { accountId: input.sourceAccountId, direction: "credit", minor: amount.minor, note: input.counterpartyRef ?? input.destination },
+            { accountId: input.counterAccountId, direction: "debit", minor: amount.minor },
+          ],
+        },
+        ...(feeMinor > 0n
+          ? [{
+              type: "fee" as const,
+              state: "CREATED" as const,
+              idempotencyKey: `${input.idempotencyKey ?? "noid"}:fee`,
+              entries: [
+                { accountId: input.feeAccountId ?? input.counterAccountId, direction: "debit" as const, minor: feeMinor, note: "network fee" },
+                { accountId: input.sourceAccountId, direction: "credit" as const, minor: feeMinor },
+              ],
+            }]
+          : []),
+      ]);
+      const tx = batch[0];
 
-    // Record the real ledger reference on the consumed approval.
-    if (approvalId) {
-      const consumed = this.approvals.get(approvalId);
-      if (consumed) {
-        consumed.executedRef = tx.id;
-        consumed.audit.push({ at: new Date().toISOString(), event: "EXECUTED_REF", detail: tx.id });
+      // Idempotency fingerprint rides in the audit trail (hash-chained).
+      if (input.idempotencyKey) {
+        this.ledger.annotate(tx.id, "FINGERPRINT", fingerprint);
       }
-    }
 
-    const p = this.hydrate(tx.id);
-    this.fire("payment.created", p);
-    return p;
+      // 5. Finalize the reservation with the real ledger reference.
+      if (approvalId && reservationToken) {
+        this.approvals.finalizeExecution(approvalId, reservationToken, tx.id);
+      }
+
+      const p = this.hydrate(tx.id);
+      this.fire("payment.created", p);
+      return p;
+    } catch (e) {
+      // Posting failed: the OWNER releases the reservation so the approval
+      // is not stranded, and the ledger stays untouched (commitMany is
+      // atomic). A crash between reserve and commit strands the reservation
+      // RESERVED — fail-closed (no re-execution); the audit trail shows it.
+      if (approvalId && reservationToken) {
+        try { this.approvals.releaseReservation(approvalId, reservationToken, `posting failed: ${(e as Error).message?.slice(0, 120)}`); } catch { /* audit trail keeps both */ }
+      }
+      throw e;
+    }
   }
 
   /** Move forward with real-world evidence. Fabricated hashes are refused by the ledger. */
   markSubmitted(paymentLedgerTxId: string, txHash: string): Payment {
     const tx = this.ledger.getTransaction(paymentLedgerTxId);
     if (!tx) throw new Error(`Unknown payment transaction ${paymentLedgerTxId}.`);
-    this.ledger.attachTxHash(paymentLedgerTxId, txHash);
-    this.ledger.transition(paymentLedgerTxId, "SUBMITTED", `evidence ${txHash.slice(0, 18)}…`);
+    this.ledger.attachTxHash(paymentLedgerTxId, txHash, { network: tx.entries[0]?.network, level: "operator_asserted" });
+    this.ledger.transition(paymentLedgerTxId, "SUBMITTED", `evidence ${txHash.slice(0, 18)}… (operator asserted)`);
     const p = this.hydrate(paymentLedgerTxId);
     this.fire("payment.submitted", p);
     return p;
   }
 
   markConfirmed(paymentLedgerTxId: string, note?: string): Payment {
+    const tx = this.ledger.getTransaction(paymentLedgerTxId);
+    if (!tx) throw new Error(`Unknown payment transaction ${paymentLedgerTxId}.`);
+    if (!tx.txHash) {
+      throw new Error(`CONFIRM_REQUIRES_EVIDENCE: payment ${paymentLedgerTxId} has no transaction hash — confirm attaches real evidence first (readiness P23).`);
+    }
     this.ledger.transition(paymentLedgerTxId, "CONFIRMED", note);
     const p = this.hydrate(paymentLedgerTxId);
     this.fire("payment.confirmed", p);
     return p;
   }
 
-  /** Settlement. Only CONFIRMED payments settle — submission never settles. */
+  /**
+   * Chain-verified evidence (readiness P23): an injected provider checked
+   * the receipt on-chain (success, destination, amount). The verifier's
+   * identity is recorded — the ledger labels what was verified and by whom,
+   * never manufacturing confidence it does not have.
+   */
+  attachChainVerifiedEvidence(paymentLedgerTxId: string, txHash: string, verification: { provider: string; receipt: Record<string, unknown> }): Payment {
+    const tx = this.ledger.getTransaction(paymentLedgerTxId);
+    if (!tx) throw new Error(`Unknown payment transaction ${paymentLedgerTxId}.`);
+    this.ledger.attachTxHash(paymentLedgerTxId, txHash, { network: tx.entries[0]?.network, level: "chain_verified" });
+    this.ledger.annotate(paymentLedgerTxId, "CHAIN_VERIFIED", `provider=${verification.provider} receipt=${JSON.stringify(verification.receipt).slice(0, 180)}`);
+    return this.hydrate(paymentLedgerTxId);
+  }
+
+  /**
+   * Settlement requires CONFIRMED state AND chain-verified evidence — an
+   * operator-asserted hash is a claim, not a proof (readiness P23).
+   */
   markSettled(paymentLedgerTxId: string, note?: string): Payment {
+    const tx = this.ledger.getTransaction(paymentLedgerTxId);
+    if (!tx) throw new Error(`Unknown payment transaction ${paymentLedgerTxId}.`);
+    if (tx.evidenceLevel !== "chain_verified") {
+      throw new Error(
+        `SETTLE_REQUIRES_CHAIN_VERIFIED: payment ${paymentLedgerTxId} evidence is ${tx.evidenceLevel ?? "absent"}. ` +
+          `Only chain-verified payments settle — attach verified evidence first.`
+      );
+    }
     this.ledger.transition(paymentLedgerTxId, "SETTLED", note);
     const p = this.hydrate(paymentLedgerTxId);
     this.fire("payment.settled", p);
@@ -210,8 +341,10 @@ export class PaymentOrchestrator {
   }
 
   /** Reconcile external reality into the record (from a Horizon/RPC lookup the caller performed). */
-  attachEvidence(paymentLedgerTxId: string, txHash: string, confirmed: boolean): Payment {
-    this.ledger.attachTxHash(paymentLedgerTxId, txHash);
+  attachEvidence(paymentLedgerTxId: string, txHash: string, confirmed: boolean, level: "operator_asserted" | "chain_verified" = "operator_asserted"): Payment {
+    const tx = this.ledger.getTransaction(paymentLedgerTxId);
+    if (!tx) throw new Error(`Unknown payment transaction ${paymentLedgerTxId}.`);
+    this.ledger.attachTxHash(paymentLedgerTxId, txHash, { network: tx.entries[0]?.network, level });
     return confirmed ? this.markConfirmed(paymentLedgerTxId, "external confirmation") : this.hydrate(paymentLedgerTxId);
   }
 
@@ -258,6 +391,18 @@ export class PaymentOrchestrator {
     const tx = this.ledger.getTransaction(ledgerTxId)!;
     const outEntry = tx.entries.find((e) => e.direction === "debit");
     const acc = outEntry ? this.ledger.getAccount(outEntry.accountId) : undefined;
+    // Decimals from the central money registry — never a hardcoded fallback
+    // that silently misdisplays ETH/SOL/BTC (readiness P23).
+    let decimals = 2;
+    if (acc) {
+      try {
+        // Lazy require avoids a cycle: money.ts has no payments imports.
+        const money = require("./money") as typeof import("./money");
+        decimals = acc.network ? money.tokenDecimals(acc.unit) : money.currencyDecimals(acc.unit);
+      } catch {
+        decimals = acc.network ? 18 : 2; // display-only fallback; amounts stay raw minor
+      }
+    }
     return {
       id: tx.id,
       idempotencyKey: tx.idempotencyKey,
@@ -266,14 +411,15 @@ export class PaymentOrchestrator {
         minor: (outEntry?.minor ?? 0n).toString(),
         unit: acc?.unit ?? "?",
         network: acc?.network,
-        decimals: acc?.unit === "USDC" || acc?.unit === "USDT" || acc?.unit === "EURC" ? 6 : acc?.unit === "XLM" ? 7 : 2,
+        decimals,
         kind: acc?.network ? "token" : "fiat",
       },
-      destination: tx.entries.find((e) => e.note)?.note,
+      destination: tx.refDestination ?? tx.entries.find((e) => e.note)?.note,
       state: tx.state,
       ledgerTxId: tx.id,
       approvalId: tx.refApprovalId,
       txHash: tx.txHash,
+      evidenceLevel: tx.evidenceLevel,
       createdAt: tx.createdAt,
       updatedAt: tx.updatedAt,
       audit: tx.audit,

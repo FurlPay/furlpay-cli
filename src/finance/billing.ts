@@ -37,7 +37,10 @@ export class BillingManager {
       counts[tx.state] = (counts[tx.state] ?? 0) + 1;
       if (tx.state === "FAILED") failed++;
       if (["PENDING", "AUTHORIZED", "SUBMITTED"].includes(tx.state)) pending++;
-      if (tx.state === "SETTLED") settled++;
+      // Settled volume counts ONLY chain-verified settlements (readiness P23):
+      // an operator-asserted hash is a claim, not proof, and never becomes
+      // settled volume — even if stale persisted state somehow says SETTLED.
+      if (tx.state === "SETTLED" && tx.evidenceLevel === "chain_verified") settled++;
       if (tx.type === "fee") {
         for (const e of tx.entries) {
           const acc = this.ledger.getAccount(e.accountId);

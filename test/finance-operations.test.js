@@ -20,6 +20,7 @@ const assert = require("node:assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { spawn } = require("node:child_process");
 
 const { FinancialLedger } = require("../dist/finance/ledger");
 const { SpendManager } = require("../dist/finance/spend");
@@ -34,6 +35,7 @@ function tmpDir() {
 }
 
 const USDC = (ui) => money.token("USDC", "base", ui);
+const DEST = "0x" + "b".repeat(40); // valid EVM destination for orchestrator tests
 
 describe("Money abstraction", () => {
   it("parses and formats minor units exactly (no floats)", () => {
@@ -124,6 +126,9 @@ describe("Double-entry ledger", () => {
     ledger.transition(tx.id, "SUBMITTED");
     assert.throws(() => ledger.transition(tx.id, "CANCELLED"), /Illegal/); // in-flight cannot cancel
     ledger.transition(tx.id, "CONFIRMED");
+    // Evidence gate: CONFIRMED → SETTLED refuses without chain-verified evidence
+    assert.throws(() => ledger.transition(tx.id, "SETTLED"), /SETTLE_REQUIRES_CHAIN_VERIFIED/);
+    ledger.attachTxHash(tx.id, "0x" + "a".repeat(64), { level: "chain_verified" });
     ledger.transition(tx.id, "SETTLED");
     assert.strictEqual(ledger.getTransaction(tx.id).state, "SETTLED");
   });
@@ -139,6 +144,7 @@ describe("Double-entry ledger", () => {
     ] });
     ledger.transition(t1.id, "SUBMITTED");
     ledger.transition(t1.id, "CONFIRMED");
+    ledger.attachTxHash(t1.id, "0x" + "b".repeat(64), { level: "chain_verified" });
     ledger.transition(t1.id, "SETTLED");
     const b = ledger.accountBalance("wallet:USDC:base");
     assert.strictEqual(b.settledMinor, 10_000_000n);
@@ -166,9 +172,9 @@ describe("Double-entry ledger", () => {
       { accountId: "wallet:USDC:base", direction: "credit", minor: 1n },
       { accountId: "expense:pay", direction: "debit", minor: 1n },
     ] });
-    assert.throws(() => ledger.attachTxHash(tx.id, "totally-made-up"), /transaction hash/);
-    ledger.attachTxHash(tx.id, "0xabc123def456");
-    assert.strictEqual(ledger.getTransaction(tx.id).txHash, "0xabc123def456");
+    assert.throws(() => ledger.attachTxHash(tx.id, "totally-made-up"), /TX_HASH_INVALID/);
+    ledger.attachTxHash(tx.id, "0x" + "a".repeat(64));
+    assert.strictEqual(ledger.getTransaction(tx.id).txHash, "0x" + "a".repeat(64));
   });
 });
 
@@ -185,12 +191,16 @@ describe("Spend controls", () => {
 
   it("daily limit refuses the breaching claim and passes the safe one", () => {
     spend.setLimits({ dailyMinor: 10_000_000n }); // 10 USDC
-    // A settled payment today consuming 8 USDC
-    const t = ledger.commit({ type: "payment_out", state: "SETTLED", entries: [
+    // A settled payment today consuming 8 USDC — settled the honest way:
+    // committed, evidenced, then walked through the state machine.
+    const t = ledger.commit({ type: "payment_out", entries: [
       { accountId: "w", direction: "credit", minor: 8_000_000n, note: "GDEST" },
       { accountId: "e", direction: "debit", minor: 8_000_000n },
     ] });
-    void t;
+    ledger.attachTxHash(t.id, "0x" + "c".repeat(64), { level: "chain_verified" });
+    ledger.transition(t.id, "SUBMITTED");
+    ledger.transition(t.id, "CONFIRMED");
+    ledger.transition(t.id, "SETTLED");
     const refused = spend.check({ minor: 3_000_000n, unit: "USDC", network: "base" });
     assert.strictEqual(refused.allowed, false);
     assert.match(refused.reason, /Daily spend limit/);
@@ -230,7 +240,7 @@ describe("Approval engine", () => {
     engine = new ApprovalEngine(path.join(dir, "approvals.json"));
   });
 
-  const params = { minor: 75_000_000n, unit: "USDC", network: "base", destination: "GDEST...", type: "payment_out", feeMinor: 100_000n };
+  const params = { minor: 75_000_000n, unit: "USDC", network: "base", destination: DEST, type: "payment_out", feeMinor: 100_000n };
 
   it("binds approval to exact parameters — changed params are refused", () => {
     const req = engine.create(params, { level: "medium", notes: "" });
@@ -256,18 +266,52 @@ describe("Approval engine", () => {
   it("single-use: consumed approvals refuse re-approval and re-execution", () => {
     const req = engine.create(params, { level: "low", notes: "" });
     engine.approve(req.id, params);
-    engine.consumeForExecution(req.id, params, "ltx_1");
+    const res = engine.reserveForExecution(req.id, params);
+    engine.finalizeExecution(req.id, res.ownerToken, "ltx_1");
     assert.throws(() => engine.approve(req.id, params), /not AWAITING_APPROVAL/);
-    assert.throws(() => engine.consumeForExecution(req.id, params, "ltx_2"), /only APPROVED/);
+    assert.throws(() => engine.reserveForExecution(req.id, params), /APPROVAL_NOT_EXECUTABLE/);
   });
 
-  it("execution re-verifies parameters — post-approval substitution refused", () => {
+  it("execution re-verifies parameters — post-approval substitution refused, nothing consumed", () => {
     const req = engine.create(params, { level: "low", notes: "" });
     engine.approve(req.id, params);
     assert.throws(
-      () => engine.consumeForExecution(req.id, { ...params, destination: "GATTACKER..." }, "ltx"),
-      /Execution binding mismatch/
+      () => engine.reserveForExecution(req.id, { ...params, destination: "0xsubstituted-destination" }),
+      /EXECUTION_BINDING_MISMATCH/
     );
+    assert.strictEqual(engine.get(req.id).state, "APPROVED", "failed reserve leaves the approval untouched");
+  });
+
+  it("reservation is exclusive — one approval funds exactly one execution", () => {
+    const req = engine.create(params, { level: "low", notes: "" });
+    engine.approve(req.id, params);
+    const res = engine.reserveForExecution(req.id, params);
+    assert.throws(() => engine.reserveForExecution(req.id, params), /APPROVAL_ALREADY_RESERVED/);
+    engine.releaseReservation(req.id, res.ownerToken, "posting failed in test");
+    assert.strictEqual(engine.get(req.id).state, "APPROVED", "released reservation returns to APPROVED");
+  });
+
+  it("REGRESSION (P23): a reservation loser cannot release the winner's reservation", () => {
+    const req = engine.create(params, { level: "low", notes: "" });
+    engine.approve(req.id, params);
+    // Winner reserves…
+    const winner = engine.reserveForExecution(req.id, params);
+    // …a loser (no token, e.g. a concurrent process whose reserve threw)
+    // attempts to release or finalize with a forged/absent token.
+    assert.throws(() => engine.releaseReservation(req.id, "00000000-0000-4000-8000-000000000000", "loser"), /RESERVATION_OWNER_MISMATCH/);
+    assert.throws(() => engine.finalizeExecution(req.id, "forged-token", "ltx_fake"), /RESERVATION_OWNER_MISMATCH/);
+    assert.strictEqual(engine.get(req.id).state, "RESERVED", "loser attempts left the winner's reservation intact");
+    // The real owner still finalizes cleanly.
+    engine.finalizeExecution(req.id, winner.ownerToken, "ltx_real");
+    assert.strictEqual(engine.get(req.id).state, "EXECUTED");
+  });
+
+  it("REGRESSION (P23): absent fee and zero fee hash identically — the fee bind cannot be dodged by omission", () => {
+    const noFee = paramsHashOf({ minor: 100n, unit: "USDC", network: "base", destination: "0xab", type: "payment_out" });
+    const zeroFee = paramsHashOf({ minor: 100n, unit: "USDC", network: "base", destination: "0xab", type: "payment_out", feeMinor: 0n });
+    const realFee = paramsHashOf({ minor: 100n, unit: "USDC", network: "base", destination: "0xab", type: "payment_out", feeMinor: 1n });
+    assert.strictEqual(noFee, zeroFee);
+    assert.notStrictEqual(noFee, realFee);
   });
 
   it("hash canonicalization is stable regardless of key insertion order", () => {
@@ -285,12 +329,13 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     fin = new FinanceManager({ dir });
   });
 
-  it("full lifecycle: created → (approval) → evidence → confirmed → settled", () => {
+  it("full lifecycle: created → (approval) → evidence → confirmed; SETTLED needs chain-verified evidence", () => {
     const ids = fin.ensureStandardAccounts("USDC", "base");
+    const DEST = "0x" + "a".repeat(40); // valid EVM destination (readiness P23)
     // Above the $50 default threshold → returns an approval request, no ledger posting
     const req = fin.payments.createOutPayment({
       amount: USDC("75"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
@@ -301,13 +346,13 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     assert.strictEqual(fin.ledger.listTransactions().length, 0, "no money moved without a human");
 
     // Human approves the exact parameters
-    const params = { minor: 75_000_000n, unit: "USDC", network: "base", destination: "GDEST...", source: ids.sourceId, type: "payment_out", feeMinor: 10_000n };
+    const params = { minor: 75_000_000n, unit: "USDC", network: "base", destination: DEST, source: ids.sourceId, type: "payment_out", feeMinor: 10_000n };
     fin.approvals.approve(req.id, params);
 
-    // Re-create with the approval → posts
+    // Re-create with the approval → posts atomically (payment + fee)
     const p = fin.payments.createOutPayment({
       amount: USDC("75"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
@@ -317,20 +362,301 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     });
     assert.ok(p.id.startsWith("ltx_"));
     assert.strictEqual(p.state, "CREATED");
+    assert.strictEqual(fin.approvals.get(req.id).state, "EXECUTED", "reservation finalized with the ledger ref");
 
-    // Evidence-attached progress; settle only after confirm
-    fin.payments.markSubmitted(p.id, "0xfeedface1234");
-    fin.payments.markConfirmed(p.id);
+    // Evidence-attached progress. Operator-asserted hash caps at CONFIRMED —
+    // settlement requires chain-verified evidence (readiness P23).
+    fin.payments.markSubmitted(p.id, "0x" + "f".repeat(64));
+    const confirmed = fin.payments.markConfirmed(p.id);
+    assert.strictEqual(confirmed.state, "CONFIRMED");
+    assert.strictEqual(confirmed.evidenceLevel, "operator_asserted");
+    assert.throws(() => fin.payments.markSettled(p.id), /SETTLE_REQUIRES_CHAIN_VERIFIED/);
+
+    // Chain-verified evidence unlocks settlement.
+    const verified = fin.payments.attachChainVerifiedEvidence(p.id, "0x" + "f".repeat(64), {
+      provider: "test-rpc",
+      receipt: { status: 1 },
+    });
+    assert.strictEqual(verified.evidenceLevel, "chain_verified");
     const settled = fin.payments.markSettled(p.id);
     assert.strictEqual(settled.state, "SETTLED");
-    assert.strictEqual(fin.payments.get(p.id).txHash, "0xfeedface1234");
+  });
+
+  it("REGRESSION (P23): a binding mismatch refuses and leaves the ledger byte-identical", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    const DEST = "0x" + "b".repeat(40);
+    // Exact observed sequence: approval created fee-less, presented with a fee.
+    const req = fin.payments.createOutPayment({
+      amount: USDC("75"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+      feeAccountId: ids.feesId,
+    });
+    fin.approvals.approve(req.id, {
+      minor: 75_000_000n, unit: "USDC", network: "base", destination: DEST, source: ids.sourceId, type: "payment_out",
+    });
+    const before = fs.readFileSync(fin.ledger.filePathUsed, "utf8");
+    assert.throws(
+      () => fin.payments.createOutPayment({
+        amount: USDC("75"),
+        destination: DEST,
+        sourceAccountId: ids.sourceId,
+        destinationAccountId: ids.sourceId,
+        counterAccountId: ids.counterId,
+        feeAccountId: ids.feesId,
+        feeMinor: 10_000n, // ← the parameter that moved
+        approvalId: req.id,
+      }),
+      /EXECUTION_BINDING_MISMATCH/
+    );
+    const after = fs.readFileSync(fin.ledger.filePathUsed, "utf8");
+    assert.strictEqual(after, before, "a refused execution must leave the ledger byte-identical");
+    assert.strictEqual(fin.ledger.listTransactions().length, 0);
+    assert.strictEqual(fin.approvals.get(req.id).state, "APPROVED", "approval not stranded or burned by the refusal");
+  });
+
+  it("REGRESSION (P23): GDEST-style junk destinations are refused before an approval exists", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    assert.throws(
+      () => fin.payments.createOutPayment({
+        amount: USDC("10"),
+        destination: "GDEST123",
+        sourceAccountId: ids.sourceId,
+        destinationAccountId: ids.sourceId,
+        counterAccountId: ids.counterId,
+      }),
+      /DESTINATION_INVALID/
+    );
+    assert.strictEqual(fin.ledger.listTransactions().length, 0);
+  });
+
+  it("REGRESSION (P23): idempotency-key with DIFFERENT parameters is a conflict, not a success", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    const DEST = "0x" + "c".repeat(40);
+    const mk = (feeMinor) => fin.payments.createOutPayment({
+      amount: USDC("10"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+      feeMinor,
+      idempotencyKey: "key-1",
+    });
+    mk(0n);
+    assert.throws(() => mk(10_000n), /IDEMPOTENCY_CONFLICT/);
+  });
+
+  it("REGRESSION (P23): amount + fee together cross the approval threshold; fee consumes spend budget", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    const DEST = "0x" + "d".repeat(40);
+    // 49.999 USDC + 0.01 fee = 50.009 > 50 threshold → approval required
+    const req = fin.payments.createOutPayment({
+      amount: USDC("49.999"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+      feeAccountId: ids.feesId,
+      feeMinor: 10_000n,
+    });
+    assert.ok(req.paramsHash, "amount+fee crossing the threshold triggers approval");
+    assert.strictEqual(fin.ledger.listTransactions().length, 0);
+
+    // Spend cap counts amount+fee: daily cap exactly 10 USDC refuses 9.999 + 0.01 fee.
+    fin.spend.setLimits({ dailyMinor: 10_000_000n });
+    assert.throws(
+      () => fin.payments.createOutPayment({
+        amount: USDC("9.999"),
+        destination: DEST,
+        sourceAccountId: ids.sourceId,
+        destinationAccountId: ids.sourceId,
+        counterAccountId: ids.counterId,
+        feeMinor: 10_000n,
+      }),
+      /SPEND_REFUSED/
+    );
+  });
+
+  it("REGRESSION (P23): unknown units fail closed — always require approval", () => {
+    const ids = fin.ensureStandardAccounts("SHIB", "base"); // unit with no configured threshold
+    const req = fin.payments.createOutPayment({
+      amount: money.token("SHIB", "base", "1", 18),
+      destination: "0x" + "e".repeat(40),
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    assert.ok(req.paramsHash, "unknown unit → approval required regardless of amount");
+  });
+
+  it("REGRESSION (P23): fiat thresholds use 2-decimal minor units — a large 2-dp fiat payment triggers approval", () => {
+    // Fiat accounts carry no network — a hosted-style EUR payment over the
+    // per-unit threshold must still be gated.
+    const ids = fin.ensureStandardAccounts("EUR");
+    assert.strictEqual(ids.sourceId, "wallet:EUR");
+    const req = fin.payments.createOutPayment({
+      amount: money.fiat("EUR", "500"), // 50_000 minor > 5_000 threshold
+      destination: "vendor@example.eu",
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    assert.ok(req.paramsHash, "EUR 500 triggers approval via the 2-dp threshold table");
+    // …while a small fiat payment below the threshold executes directly.
+    const small = fin.payments.createOutPayment({
+      amount: money.fiat("EUR", "20"),
+      destination: "vendor@example.eu",
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    assert.ok(small.ledgerTxId, "EUR 20 posts without approval");
+  });
+
+  it("REGRESSION (P23): a dead idempotency key (cancelled/failed original) is surfaced, never re-served as success", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    const p = fin.payments.createOutPayment({
+      amount: USDC("10"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+      idempotencyKey: "dead-key",
+    });
+    fin.ledger.transition(p.id, "CANCELLED", "operator cancelled before submission");
+    assert.throws(
+      () => fin.payments.createOutPayment({
+        amount: USDC("10"),
+        destination: DEST,
+        sourceAccountId: ids.sourceId,
+        destinationAccountId: ids.sourceId,
+        counterAccountId: ids.counterId,
+        idempotencyKey: "dead-key",
+      }),
+      /IDEMPOTENCY_KEY_DEAD/
+    );
+  });
+
+  it("REGRESSION (P23): cancelling a CREATED payment releases its spend consumption", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    fin.spend.setLimits({ dailyMinor: 10_000_000n });
+    const p = fin.payments.createOutPayment({
+      amount: USDC("9"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    // CREATED money-in-flight is consumed: only 1 USDC headroom remains.
+    assert.strictEqual(fin.spend.check({ minor: 2_000_000n, unit: "USDC", network: "base" }).allowed, false);
+    fin.ledger.transition(p.id, "CANCELLED", "test cancel");
+    // CANCELLED releases: the same claim passes again.
+    assert.strictEqual(fin.spend.check({ minor: 2_000_000n, unit: "USDC", network: "base" }).allowed, true);
+  });
+
+  it("REGRESSION (P23): operator-asserted evidence never reaches settled volume in billing", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    // Payment A: full honest lifecycle to chain-verified SETTLED.
+    const a = fin.payments.createOutPayment({
+      amount: USDC("5"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    fin.payments.markSubmitted(a.id, "0x" + "7".repeat(64));
+    fin.payments.markConfirmed(a.id);
+    fin.payments.attachChainVerifiedEvidence(a.id, "0x" + "7".repeat(64), { provider: "test-rpc", receipt: { status: 1 } });
+    fin.payments.markSettled(a.id);
+    // Payment B: operator-asserted evidence — stuck at CONFIRMED, unverifiable.
+    const b = fin.payments.createOutPayment({
+      amount: USDC("3"),
+      destination: "0x" + "f".repeat(40),
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    fin.payments.markSubmitted(b.id, "0x" + "8".repeat(64));
+    fin.payments.markConfirmed(b.id);
+    const s = fin.billing.summary();
+    assert.strictEqual(s.settledCount, 1, "only the chain-verified payment counts as settled");
+    assert.strictEqual(s.volumeOutMinorByUnit.USDC, 8_000_000n, "volume covers both outflows (honest report of movement)");
+    // …and the billing CSV carries the state so an accountant can see B is unverified.
+    assert.ok(fin.billing.exportCsv().includes("CONFIRMED"));
+  });
+
+  it("REGRESSION (P23): fake or short hashes on an EVM network are rejected at attach time", () => {
+    const ids = fin.ensureStandardAccounts("USDC", "base");
+    const p = fin.payments.createOutPayment({
+      amount: USDC("1"),
+      destination: DEST,
+      sourceAccountId: ids.sourceId,
+      destinationAccountId: ids.sourceId,
+      counterAccountId: ids.counterId,
+    });
+    assert.throws(() => fin.payments.markSubmitted(p.id, "0xdeadbeef123456"), /TX_HASH_INVALID/);
+    assert.throws(() => fin.payments.markSubmitted(p.id, "deadbeef"), /TX_HASH_INVALID/);
+    assert.strictEqual(fin.ledger.getTransaction(p.id).txHash, undefined, "refused hash was never stored");
+  });
+
+  it("REGRESSION (P23): one approval with N parallel PROCESSES → exactly one execution", { timeout: 60_000 }, async () => {
+    const raceDir = tmpDir();
+    const parent = new FinanceManager({ dir: raceDir });
+    parent.ensureStandardAccounts("USDC", "base");
+    const RACE_DEST = "0x" + "d".repeat(40);
+    // Create the request from the SAME parameters the workers will present.
+    const req = parent.payments.createOutPayment({
+      amount: USDC("75"),
+      destination: RACE_DEST,
+      sourceAccountId: "wallet:USDC:base",
+      destinationAccountId: "wallet:USDC:base",
+      counterAccountId: "expense:payments:USDC:base",
+      feeAccountId: "expense:fees:USDC:base",
+    });
+    parent.approvals.approve(req.id, {
+      minor: 75_000_000n, unit: "USDC", network: "base", destination: RACE_DEST,
+      source: "wallet:USDC:base", type: "payment_out",
+    });
+
+    const workerPath = path.join(__dirname, "fixtures", "race-worker.js");
+    const N = 8;
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        new Promise((resolve) => {
+          let out = "";
+          const child = spawn(process.execPath, [workerPath, raceDir, req.id, String(i)], { stdio: ["ignore", "pipe", "pipe"] });
+          child.stdout.on("data", (d) => { out += d; });
+          child.on("close", (code) => resolve({ code, out }));
+        }),
+      ),
+    );
+
+    const parsed = results.map((r) => {
+      const line = r.out.trim().split("\n").pop() || "{}";
+      return JSON.parse(line);
+    });
+    const executed = parsed.filter((p) => p.outcome === "EXECUTED");
+    const refused = parsed.filter((p) => p.outcome === "REFUSED");
+    assert.strictEqual(executed.length, 1, `exactly one worker executes (got ${executed.length}): ${JSON.stringify(parsed)}`);
+    assert.strictEqual(refused.length, N - 1, "every other worker is refused");
+    for (const r of refused) {
+      assert.match(r.error, /APPROVAL_ALREADY_RESERVED|LOCK_TIMEOUT|APPROVAL_NOT_EXECUTABLE/, "refusal is the CAS, not a crash");
+    }
+
+    // Ground truth from a FRESH reader of the shared state:
+    const after = new FinanceManager({ dir: raceDir });
+    const payments = after.ledger.listTransactions().filter((t) => t.type === "payment_out");
+    assert.strictEqual(payments.length, 1, "exactly one payment_out in the ledger");
+    assert.strictEqual(after.approvals.get(req.id).state, "EXECUTED", "approval consumed exactly once");
   });
 
   it("below threshold: no approval needed; idempotent create returns the same payment", () => {
     const ids = fin.ensureStandardAccounts("USDC", "base");
     const mk = () => fin.payments.createOutPayment({
       amount: USDC("10"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
@@ -347,7 +673,7 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     fin.spend.setLimits({ perTransactionMinor: 1_000_000n });
     assert.throws(() => fin.payments.createOutPayment({
       amount: USDC("10"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
@@ -358,14 +684,14 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     const ids = fin.ensureStandardAccounts("USDC", "base");
     const p = fin.payments.createOutPayment({
       amount: USDC("5"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
     });
     const r = fin.payments.receipt(p.id);
     assert.match(r, /FURLPAY PAYMENT RECEIPT/);
-    assert.match(r, /GDEST\.\.\./);
+    assert.ok(r.includes(DEST), "receipt renders the full explicit destination, not a note-derived truncation");
     assert.match(r, /chain hash/);
   });
 
@@ -373,15 +699,16 @@ describe("Payment orchestrator (end-to-end lifecycle)", () => {
     const ids = fin.ensureStandardAccounts("USDC", "base");
     const p = fin.payments.createOutPayment({
       amount: USDC("5"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,
       feeAccountId: ids.feesId,
       feeMinor: 50_000n,
     });
-    fin.payments.markSubmitted(p.id, "0xabc123");
+    fin.payments.markSubmitted(p.id, "0x" + "9".repeat(64));
     fin.payments.markConfirmed(p.id);
+    fin.payments.attachChainVerifiedEvidence(p.id, "0x" + "9".repeat(64), { provider: "test-rpc", receipt: { status: 1 } });
     fin.payments.markSettled(p.id);
     const s = fin.billing.summary();
     assert.strictEqual(s.volumeOutMinorByUnit.USDC, 5_000_000n);
@@ -447,7 +774,7 @@ describe("FinanceManager facade", () => {
     const ids = fin.ensureStandardAccounts("USDC", "base");
     const p = fin.payments.createOutPayment({
       amount: USDC("3"),
-      destination: "GDEST...",
+      destination: DEST,
       sourceAccountId: ids.sourceId,
       destinationAccountId: ids.sourceId,
       counterAccountId: ids.counterId,

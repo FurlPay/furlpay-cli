@@ -23,6 +23,7 @@
 
 import * as crypto from "crypto";
 import { readJsonStore, writeJsonStoreAtomic } from "./store";
+import { withExclusiveLock } from "./fileLock";
 import { MoneyAmount, formatMoney } from "./money";
 
 export type LedgerTxType =
@@ -72,6 +73,13 @@ export interface LedgerTransaction {
   idempotencyKey?: string;
   /** On-chain reference once submitted (real hash only, never fabricated). */
   txHash?: string;
+  /** How well the txHash is known: operator_asserted (typed by a human,
+   *  format-validated) or chain_verified (checked against a provider). Only
+   *  chain_verified evidence may settle or count as settled volume. */
+  evidenceLevel?: "operator_asserted" | "chain_verified";
+  /** Explicit destination of the payment (validated at creation) — never
+   *  derived from entry notes. */
+  refDestination?: string;
   /** Cross-reference to the payment/approval that produced this. */
   refPaymentId?: string;
   refApprovalId?: string;
@@ -119,6 +127,8 @@ function canonicalTx(tx: Omit<LedgerTransaction, "chainHash">): string {
     }),
     idempotencyKey: tx.idempotencyKey ?? null,
     txHash: tx.txHash ?? null,
+    evidenceLevel: tx.evidenceLevel ?? null,
+    refDestination: tx.refDestination ?? null,
     refPaymentId: tx.refPaymentId ?? null,
     refApprovalId: tx.refApprovalId ?? null,
     createdAt: tx.createdAt,
@@ -130,6 +140,20 @@ function canonicalTx(tx: Omit<LedgerTransaction, "chainHash">): string {
 
 function chainNext(prev: string, tx: Omit<LedgerTransaction, "chainHash">): string {
   return "0x" + crypto.createHash("sha256").update(prev + canonicalTx(tx)).digest("hex");
+}
+
+/** Input shape for ledger.commit / commitMany. */
+export interface LedgerCommitInput {
+  id?: string;
+  type: LedgerTxType;
+  state?: LedgerTxState;
+  entries: Array<Omit<LedgerEntry, "unit" | "network"> & { unit?: string; network?: string }>;
+  idempotencyKey?: string;
+  txHash?: string;
+  refDestination?: string;
+  refPaymentId?: string;
+  refApprovalId?: string;
+  audit?: string[];
 }
 
 const LEGAL_TRANSITIONS: Record<LedgerTxState, LedgerTxState[]> = {
@@ -162,6 +186,14 @@ export class FinancialLedger {
 
   private ensureLoaded(): void {
     if (this.loaded) return;
+    // Constructor-time read takes the SAME cross-process lock as writes: on
+    // Windows a reader that catches the file mid-rename EPERMs the writer
+    // (readiness P23 multi-process safety).
+    withExclusiveLock(this.filePath, () => this.loadUnderLock());
+    this.loaded = true;
+  }
+
+  private loadUnderLock(): void {
     const stored = readJsonStore<LedgerStoreShape>(this.filePath);
     if (stored) {
       if (stored.schema !== "furlpay-finance-ledger-v1" || !Array.isArray(stored.accounts) || !Array.isArray(stored.transactions)) {
@@ -197,19 +229,24 @@ export class FinancialLedger {
       }
       this.transactions = stored.transactions;
     }
-    this.loaded = true;
   }
 
   private persist(): void {
-    // JSON cannot carry BigInt — minors serialize as decimal strings, the
-    // exact canonical form the hash chain is computed over.
-    writeJsonStoreAtomic(this.filePath, {
-      schema: "furlpay-finance-ledger-v1",
-      accounts: [...this.accounts.values()],
-      transactions: this.transactions.map((tx) => ({
-        ...tx,
-        entries: tx.entries.map((e) => ({ ...e, minor: e.minor.toString() })),
-      })),
+    // Persist under the cross-process lock so a concurrent ledger reader in
+    // another process can never collide with the atomic rename (readiness
+    // P23). NOTE: this serializes the WRITE, not the read-modify-write —
+    // full multi-writer transactionality is the P15 state store's job.
+    withExclusiveLock(this.filePath, () => {
+      // JSON cannot carry BigInt — minors serialize as decimal strings, the
+      // exact canonical form the hash chain is computed over.
+      writeJsonStoreAtomic(this.filePath, {
+        schema: "furlpay-finance-ledger-v1",
+        accounts: [...this.accounts.values()],
+        transactions: this.transactions.map((tx) => ({
+          ...tx,
+          entries: tx.entries.map((e) => ({ ...e, minor: e.minor.toString() })),
+        })),
+      });
     });
   }
 
@@ -250,17 +287,7 @@ export class FinancialLedger {
    * idempotencyKey: the existing transaction is returned unchanged
    * (duplicate detection), never re-posted.
    */
-  commit(input: {
-    id?: string;
-    type: LedgerTxType;
-    state?: LedgerTxState;
-    entries: Array<Omit<LedgerEntry, "unit" | "network"> & { unit?: string; network?: string }>;
-    idempotencyKey?: string;
-    txHash?: string;
-    refPaymentId?: string;
-    refApprovalId?: string;
-    audit?: string[];
-  }): LedgerTransaction {
+  commit(input: LedgerCommitInput): LedgerTransaction {
     this.ensureLoaded();
 
     if (input.idempotencyKey && this.byIdempotency.has(input.idempotencyKey)) {
@@ -308,6 +335,7 @@ export class FinancialLedger {
       idempotencyKey: input.idempotencyKey,
       txHash: input.txHash,
       refPaymentId: input.refPaymentId,
+      refDestination: input.refDestination,
       refApprovalId: input.refApprovalId,
       createdAt: now,
       updatedAt: now,
@@ -327,6 +355,77 @@ export class FinancialLedger {
     return this.transactions.length ? this.transactions[this.transactions.length - 1].chainHash : GENESIS;
   }
 
+  /**
+   * Atomic batch commit (readiness P23): ALL transactions are validated and
+   * built first; only when every one balances does anything append or
+   * persist. A payment+fee pair lands together or not at all — no orphaned
+   * payment without its fee.
+   */
+  commitMany(inputs: LedgerCommitInput[]): LedgerTransaction[] {
+    this.ensureLoaded();
+    // Phase 1: validate + build every transaction without mutating state.
+    const built: Array<Omit<LedgerTransaction, "chainHash" | "seq">> = [];
+    for (const input of inputs) {
+      if (input.idempotencyKey && this.byIdempotency.has(input.idempotencyKey)) {
+        throw new Error(`IDEMPOTENCY_CONFLICT: key ${input.idempotencyKey} already exists — commitMany never re-posts.`);
+      }
+      if (!Array.isArray(input.entries) || input.entries.length < 2) {
+        throw new Error("A double-entry transaction needs at least two entries.");
+      }
+      // No transaction is BORN settled (readiness P23): settlement is a final
+      // state reached only through the evidence-gated state machine.
+      if (input.state === "SETTLED") {
+        throw new Error("SETTLE_REQUIRES_CHAIN_VERIFIED: a transaction cannot be committed as SETTLED — walk the state machine with chain-verified evidence.");
+      }
+      const entries: LedgerEntry[] = input.entries.map((e) => {
+        const acc = this.accounts.get(e.accountId);
+        if (!acc) throw new Error(`Unknown account ${e.accountId} — create it before posting against it.`);
+        if (e.minor <= 0n) throw new Error(`Entry against ${e.accountId} must be a positive minor amount.`);
+        return { ...e, unit: acc.unit, network: acc.network, minor: e.minor };
+      });
+      const units = new Set(entries.map((e) => `${e.unit}${e.network ? ":" + e.network : ""}`));
+      if (units.size !== 1) {
+        throw new Error(`Transaction entries mix units (${[...units].join(", ")}) — split them into separate transactions.`);
+      }
+      let balance = 0n;
+      for (const e of entries) {
+        const acc = this.accounts.get(e.accountId)!;
+        const debitPositive = acc.kind === "asset" || acc.kind === "expense";
+        const sign = (e.direction === "debit") === debitPositive ? 1n : -1n;
+        balance += sign * e.minor;
+      }
+      if (balance !== 0n) throw new Error(`Transaction does not balance (signed sum ${balance} minor) — refusing to post.`);
+      const now = new Date().toISOString();
+      built.push({
+        id: input.id || `ltx_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+        type: input.type,
+        state: input.state ?? "CREATED",
+        entries,
+        idempotencyKey: input.idempotencyKey,
+        txHash: input.txHash,
+        refPaymentId: input.refPaymentId,
+        refDestination: input.refDestination,
+        refApprovalId: input.refApprovalId,
+        createdAt: now,
+        updatedAt: now,
+        audit: [{ at: now, event: "COMMITTED", detail: `balanced ${entries.length} entries` }],
+      });
+    }
+    // Phase 2: append everything, extend the chain, persist ONCE.
+    let prev = this.lastChainHash();
+    const out: LedgerTransaction[] = [];
+    for (const b of built) {
+      const seq = this.transactions.length + 1;
+      const tx: LedgerTransaction = { ...b, seq, chainHash: chainNext(prev, { ...b, seq }) };
+      this.transactions.push(tx);
+      if (tx.idempotencyKey) this.byIdempotency.set(tx.idempotencyKey, tx.id);
+      prev = tx.chainHash;
+      out.push(tx);
+    }
+    this.persist();
+    return out;
+  }
+
   // ── State machine ──────────────────────────────────────────────────────────
 
   /** Transition a transaction to a new state. Illegal transitions throw. */
@@ -337,6 +436,16 @@ export class FinancialLedger {
     if (tx.state === to) return tx; // idempotent transition
     if (!LEGAL_TRANSITIONS[tx.state].includes(to)) {
       throw new Error(`Illegal ledger transition ${tx.state} → ${to} for ${txId}. Submission is not settlement — follow the state machine.`);
+    }
+    // Evidence gate AT THE LEDGER (readiness P23): settlement is a final,
+    // billing-counted state. A transaction whose only evidence is an
+    // operator-typed hash never settles — the gate lives here so no caller
+    // (orchestrator, CLI, MCP, future adapter) can route around it.
+    if (to === "SETTLED" && tx.evidenceLevel !== "chain_verified") {
+      throw new Error(
+        `SETTLE_REQUIRES_CHAIN_VERIFIED: ${txId} evidence is ${tx.evidenceLevel ?? "absent"}. ` +
+          `Attach chain-verified evidence (provider receipt check) before settlement.`
+      );
     }
     tx.state = to;
     tx.updatedAt = new Date().toISOString();
@@ -352,16 +461,34 @@ export class FinancialLedger {
     return tx;
   }
 
-  attachTxHash(txId: string, txHash: string): LedgerTransaction {
+  /** Append an audit annotation to a transaction (rehashes the chain tail). */
+  annotate(txId: string, event: string, detail?: string): LedgerTransaction {
     this.ensureLoaded();
     const tx = this.transactions.find((t) => t.id === txId);
     if (!tx) throw new Error(`Unknown ledger transaction ${txId}.`);
-    if (!/^0x[0-9a-fA-F]{6,128}$|^[0-9a-fA-F]{6,128}$/.test(txHash)) {
-      throw new Error(`"${txHash}" does not look like a transaction hash — the ledger never stores fabricated references.`);
-    }
-    tx.txHash = txHash;
+    tx.audit.push({ at: new Date().toISOString(), event, ...(detail !== undefined ? { detail } : {}) });
     tx.updatedAt = new Date().toISOString();
-    tx.audit.push({ at: tx.updatedAt, event: "TXHASH_ATTACHED" });
+    const idx = this.transactions.indexOf(tx);
+    let prev = idx === 0 ? GENESIS : this.transactions[idx - 1].chainHash;
+    for (let i = idx; i < this.transactions.length; i++) {
+      this.transactions[i].chainHash = chainNext(prev, this.transactions[i]);
+      prev = this.transactions[i].chainHash;
+    }
+    this.persist();
+    return tx;
+  }
+
+  attachTxHash(txId: string, txHash: string, opts?: { network?: string; level?: "operator_asserted" | "chain_verified" }): LedgerTransaction {
+    this.ensureLoaded();
+    const tx = this.transactions.find((t) => t.id === txId);
+    if (!tx) throw new Error(`Unknown ledger transaction ${txId}.`);
+    // Format validation per network — 0xdeadbeef-style stubs are rejected
+    // (readiness P23). Chain-level verification is a separate, future step.
+    validateTxHash(txHash, opts?.network ?? tx.entries[0]?.network);
+    tx.txHash = txHash;
+    tx.evidenceLevel = opts?.level ?? "operator_asserted";
+    tx.updatedAt = new Date().toISOString();
+    tx.audit.push({ at: tx.updatedAt, event: `TXHASH_ATTACHED:${tx.evidenceLevel}` });
     const idx = this.transactions.indexOf(tx);
     let prev = idx === 0 ? GENESIS : this.transactions[idx - 1].chainHash;
     for (let i = idx; i < this.transactions.length; i++) {
@@ -463,6 +590,73 @@ export class FinancialLedger {
       ...lines,
     ].join("\n");
   }
+}
+
+// ── Network validation (readiness P23) ─────────────────────────────────────
+
+const EVM_NETWORKS = new Set(["base", "arbitrum", "ethereum", "optimism", "polygon", "avalanche"]);
+
+/** Destination validation at creation — GDEST-style junk is refused before an approval exists. */
+export function validateDestination(destination: string, network?: string): void {
+  if (!destination || !destination.trim()) throw new Error("DESTINATION_REQUIRED: a payment needs an explicit destination.");
+  const d = destination.trim();
+  if (!network) return; // hosted/fiat destinations are validated by the hosted flow
+  const net = network.toLowerCase();
+  if (EVM_NETWORKS.has(net)) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(d)) {
+      throw new Error(`DESTINATION_INVALID: "${d}" is not a valid ${net} address (expected 0x + 40 hex characters).`);
+    }
+    return;
+  }
+  if (net === "stellar") {
+    // StrKey with checksum — a fake address is refused at the door.
+    try {
+      // Lazy import keeps the ledger loadable without the Stellar SDK in tests that don't need it.
+      const { StrKey } = require("@stellar/stellar-sdk");
+      if (!StrKey.isValidEd25519PublicKey(d)) throw new Error("not a valid ed25519 strkey");
+    } catch {
+      throw new Error(`DESTINATION_INVALID: "${d}" is not a valid Stellar address (strkey check failed).`);
+    }
+    return;
+  }
+  if (net === "solana") {
+    // Base58, 32-byte ed25519 pubkey → 43–44 chars from the base58 alphabet.
+    if (!/^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(d)) {
+      throw new Error(`DESTINATION_INVALID: "${d}" is not a valid Solana address (base58, 32 bytes).`);
+    }
+    return;
+  }
+  throw new Error(`DESTINATION_NETWORK_UNKNOWN: no destination validation for network "${network}" — refusing rather than accepting unverifiable addresses.`);
+}
+
+/** Transaction-hash format per network. 0xdeadbeef-style stubs are rejected. */
+export function validateTxHash(txHash: string, network?: string): void {
+  const h = txHash.trim();
+  if (!network) {
+    // No network context: accept either shape but demand plausibility.
+    if (/^0x[0-9a-fA-F]{64}$/.test(h) || /^[0-9a-fA-F]{64}$/.test(h)) return;
+    throw new Error(`TX_HASH_INVALID: "${h}" is not a plausible transaction hash (expected 64 hex characters).`);
+  }
+  const net = network.toLowerCase();
+  if (EVM_NETWORKS.has(net)) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(h)) {
+      throw new Error(`TX_HASH_INVALID: "${h}" is not a valid ${net} transaction hash (expected 0x + 64 hex characters).`);
+    }
+    return;
+  }
+  if (net === "stellar") {
+    if (!/^[0-9a-fA-F]{64}$/.test(h)) {
+      throw new Error(`TX_HASH_INVALID: "${h}" is not a valid Stellar transaction hash (expected 64 hex characters).`);
+    }
+    return;
+  }
+  if (net === "solana") {
+    if (!/^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(h)) {
+      throw new Error(`TX_HASH_INVALID: "${h}" is not a valid Solana signature.`);
+    }
+    return;
+  }
+  throw new Error(`TX_HASH_NETWORK_UNKNOWN: no hash validation for network "${network}" — refusing.`);
 }
 
 export { formatMoney };
