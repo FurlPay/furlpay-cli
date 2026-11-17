@@ -237,6 +237,8 @@ async function main() {
     // ---- oracle quotes + live read-only Solana surface (2026-11-17 gaps 2/5)
     case "oracle":
     case "solana":
+    // ---- mainnet readiness gate (read-only)
+    case "mainnet":
       return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
 
     // ---- market microstructure analytics (offline, supplied book) ----------

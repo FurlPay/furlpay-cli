@@ -41,6 +41,7 @@ import { DurableEventStore, defaultBlotterPath } from "./blotter/durable-event-s
 import { OraclePriceAggregator, ASSET_CONFIG } from "./oracles/aggregator";
 import { SolanaRpcClient, assertValidSolanaAddress } from "./solana/rpc";
 import { JupiterClient, KNOWN_MINTS } from "./solana/jupiter";
+import { MainnetGate, MainnetReadinessReport } from "./mainnet/gate";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -277,6 +278,10 @@ export class FurlPayStellarCli {
 
       case "solana":
         await this.handleSolana(subcommand, args, flags);
+        break;
+
+      case "mainnet":
+        await this.handleMainnet(subcommand, args, flags);
         break;
 
       default:
@@ -925,6 +930,99 @@ export class FurlPayStellarCli {
     }
 
     console.log("Usage: furlpay solana <status|balance|price|quote> [--output json]");
+    process.exitCode = 1;
+  }
+
+  /**
+   * furlpay mainnet — readiness gate, environment status, dry-run.
+   * Strictly read-only: readiness probes, status snapshot, and a dry-run that
+   * evaluates a hypothetical order through the REAL risk engine without ever
+   * signing or submitting. Execution itself stays behind FURLPAY_LIVE, the
+   * signer, the risk engine and — for a real order — the operator's explicit
+   * transaction-specific confirmation.
+   */
+  private async handleMainnet(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = (subcommand || "readiness").toLowerCase().trim();
+    const json = flags.output === "json" || flags.json;
+    const gate = new MainnetGate();
+
+    if (sub === "readiness") {
+      const report = await gate.readiness();
+      if (json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(`Mainnet readiness — ${report.verdict.toUpperCase()} (${new Date(report.generatedAt).toISOString()})`);
+        console.log(`  PASS ${report.summary.pass} · FAIL ${report.summary.fail} · BLOCKED ${report.summary.blocked} · NOT_VERIFIED ${report.summary.notVerified}  of ${report.summary.total}`);
+        console.log("");
+        const mark: Record<string, string> = { PASS: "[PASS]", FAIL: "[FAIL]", BLOCKED: "[BLKD]", NOT_VERIFIED: "[ -- ]" };
+        for (const c of report.checks) {
+          console.log(`  ${mark[c.status]} ${c.title}`);
+          console.log(`         ${c.detail}`);
+        }
+        console.log("");
+        if (report.verdict === "ready") {
+          console.log(`  All execution-blocking checks PASS. Controlled live execution still requires a`);
+          console.log(`  transaction-specific human confirmation per order — see docs/MAINNET_TESTING_RUNBOOK.md.`);
+        } else {
+          const blockers = report.checks.filter((c) => c.blocksExecution && c.status !== "PASS");
+          console.log(`  NOT READY — execution-blocking items:`);
+          for (const b of blockers) console.log(`    - [${b.id}] ${b.status}: ${b.detail}`);
+        }
+      }
+      process.exitCode = report.verdict === "ready" ? 0 : 1;
+      return;
+    }
+
+    if (sub === "status") {
+      const snap = gate.status();
+      if (json) {
+        console.log(JSON.stringify(snap, null, 2));
+      } else {
+        console.log(`Mainnet status — ${new Date(snap.generatedAt).toISOString()}`);
+        console.log(`  Master gate: ${snap.masterGate.enabled ? "FURLPAY_LIVE=1 (signing enabled)" : "disabled (signing surfaces inert)"}`);
+        for (const s of snap.surfaces) {
+          console.log(`  - ${s.family}`);
+          console.log(`      network: ${s.network} | mode: ${s.mode} | status: ${s.status}`);
+        }
+        console.log(`  [i] Read-only snapshot. Simulation labels come from the honesty matrix, not this command.`);
+      }
+      return;
+    }
+
+    if (sub === "dry-run") {
+      const coin = (args[0] || flags.symbol || "").replace(/-PERP$/i, "").toUpperCase().trim();
+      const side = (flags.side || "").toLowerCase().trim();
+      const size = Number(flags.size);
+      const leverage = Number(flags.leverage ?? 1);
+      if (!coin || (side !== "buy" && side !== "sell") || !Number.isFinite(size) || size <= 0) {
+        console.log("Usage: furlpay mainnet dry-run <SYMBOL> --side buy|sell --size <sz> [--leverage 1] [--output json]");
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const res = await gate.dryRun({ coin, side, size, leverage });
+        if (json) {
+          console.log(JSON.stringify(res, null, 2));
+        } else {
+          console.log(`Dry run (NOT SIGNED, NOT SUBMITTED) — ${coin} ${side.toUpperCase()} ${size} @ ${leverage}x`);
+          console.log(`  Reference price: book mid (a dry run never invents a limit price).`);
+          console.log(`  Risk engine verdict: ${res.risk.passed ? "PASS" : "REFUSED"}${res.risk.reason ? ` — ${res.risk.reason}` : ""}`);
+          for (const w of res.risk.warnings ?? []) console.log(`  [!] ${w}`);
+          console.log(`  [i] Evaluated against live mainnet metadata and L2 book. Nothing was signed,`);
+          console.log(`      submitted, or recorded against the daily turnover cap.`);
+        }
+        process.exitCode = res.risk.passed ? 0 : 1;
+      } catch (err: any) {
+        console.error(`[!] Dry run failed: ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    console.log("Usage: furlpay mainnet <readiness|status|dry-run> [--output json]");
+    console.log("  readiness  every execution prerequisite, PASS/FAIL/BLOCKED/NOT_VERIFIED (exit 1 = not ready)");
+    console.log("  status     which network each surface targets, read-only vs mutating");
+    console.log("  dry-run    evaluate a hypothetical order through the real risk engine — never signs");
     process.exitCode = 1;
   }
 
@@ -2211,6 +2309,8 @@ COMMANDS:
   finance      Local financial operations: double-entry ledger, payments, spend limits, approvals, treasury, billing (init, status, ledger, spend, approval, payment, treasury, billing, events)
   oracle       Live multi-source USD price quotes with cross-source agreement gating (price, sources)
   solana       Live read-only Solana RPC + Jupiter surface: cluster status, lamport balance, indicative quotes (status, balance, price, quote)
+  mainnet      Read-only mainnet readiness gate: prerequisites, network status, risk-engine dry run (readiness, status, dry-run)
+  mainnet      Read-only mainnet readiness gate: prerequisites, network status, risk-engine dry run (readiness, status, dry-run)
   tx verify    Verify a real Stellar transaction against Horizon (honest lookup semantics, --output json)
   faucet       Fund a testnet/futurenet account via the official Stellar Friendbot (refuses mainnet)
 `);

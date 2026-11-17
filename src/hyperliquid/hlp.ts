@@ -23,6 +23,43 @@ interface HlpLockupStore {
   lastDepositMs: Record<string, number>;
 }
 
+/**
+ * Hyperliquid's vaultTransfer wire field is INTEGER micro-USDC (1e6 scale —
+ * the same unit as ERC-20 6-decimal USDC), never a float. `usd: 50` on the
+ * wire means $0.00005, not $50 (mainnet-readiness audit Gap 2). Convert here,
+ * once, and refuse anything unrepresentable instead of silently rounding:
+ * a silently-rounded deposit moves different money than the user asked to move.
+ */
+function toWireMicroUsd(amountUsd: number, kind: "deposit" | "withdrawal"): number {
+  if (!Number.isFinite(amountUsd)) {
+    throw new Error(`HLP ${kind} amount must be a finite number (got ${amountUsd}).`);
+  }
+  if (amountUsd <= 0) {
+    throw new Error(`HLP ${kind} amount must be positive.`);
+  }
+  const asStr = String(amountUsd);
+  const decimals = asStr.includes(".") ? asStr.split(".")[1].length : 0;
+  if (decimals > DecimalMath.USDC_DECIMALS) {
+    throw new Error(
+      `HLP ${kind} amount has more than ${DecimalMath.USDC_DECIMALS} decimal places ` +
+        `(${asStr}); sub-micro-cent amounts cannot be represented on the Hyperliquid wire. ` +
+        `Round to a 6-decimal value and retry.`
+    );
+  }
+  const micro = DecimalMath.parseUnits(asStr, DecimalMath.USDC_DECIMALS);
+  // Absurdity bound, not a policy cap: protects against unit-conversion bugs
+  // producing a billion-dollar transfer from a typo. Policy caps are the risk
+  // engine's job.
+  if (micro > 100_000_000_000_000n) {
+    throw new Error(`HLP ${kind} amount exceeds the $100,000,000 per-transfer sanity bound.`);
+  }
+  const wire = Number(micro);
+  if (!Number.isSafeInteger(wire)) {
+    throw new Error(`HLP ${kind} amount does not convert to a safe integer micro-USDC value.`);
+  }
+  return wire;
+}
+
 export class HlpVaultService {
   private client: HyperliquidClient;
   private signer: HyperliquidSigner | null = null;
@@ -188,7 +225,7 @@ export class HlpVaultService {
       type: "vaultTransfer",
       vaultAddress: this.vaultAddress,
       isDeposit: true,
-      usd: amountUsd,
+      usd: toWireMicroUsd(amountUsd, "deposit"),
     };
 
     // Capability registry live gate (readiness P1) — signed value movement.
@@ -254,7 +291,7 @@ export class HlpVaultService {
       type: "vaultTransfer",
       vaultAddress: this.vaultAddress,
       isDeposit: false,
-      usd: amountUsd,
+      usd: toWireMicroUsd(amountUsd, "withdrawal"),
     };
 
     // Capability registry live gate (readiness P1) — signed value movement.

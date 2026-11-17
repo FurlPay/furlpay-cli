@@ -27,12 +27,21 @@ export class HyperliquidClient {
   private cachedMeta: HyperliquidMeta | null = null;
   private metaCacheTime: number = 0;
   private metaCacheTtlMs: number = 60_000; // 1 minute cache
+  /**
+   * Injectable transport for tests (mainnet-readiness gate). Null = the
+   * production native-https path — behavior is identical, only the socket
+   * under the JSON differs.
+   */
+  private fetchImpl: ((url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>) | null;
 
-  constructor(network: HyperliquidNetwork = "mainnet") {
+  constructor(network: HyperliquidNetwork = "mainnet", opts?: {
+    fetchImpl?: (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+  }) {
     this.network = network;
-    this.apiUrl = network === "testnet" 
-      ? "https://api.hyperliquid-testnet.xyz" 
+    this.apiUrl = network === "testnet"
+      ? "https://api.hyperliquid-testnet.xyz"
       : "https://api.hyperliquid.xyz";
+    this.fetchImpl = opts?.fetchImpl ?? null;
   }
 
   getNetwork(): HyperliquidNetwork {
@@ -49,6 +58,19 @@ export class HyperliquidClient {
   private async postRequest<T>(endpoint: "/info" | "/exchange", payload: any): Promise<T> {
     const targetUrl = new URL(endpoint, this.apiUrl);
     const bodyStr = JSON.stringify(payload);
+
+    // Injected transport (tests): same JSON semantics, no socket.
+    if (this.fetchImpl) {
+      const res = await this.fetchImpl(targetUrl.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": "FurlPay-CLI/0.4.0" },
+        body: bodyStr,
+      });
+      if (!res.ok) {
+        throw new Error(`Hyperliquid API Error HTTP ${res.status}`);
+      }
+      return (await res.json()) as T;
+    }
 
     return new Promise((resolve, reject) => {
       const isHttps = targetUrl.protocol === "https:";

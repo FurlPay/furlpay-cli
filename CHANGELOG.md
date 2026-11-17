@@ -8,6 +8,43 @@ releases; patch releases are always safe to take.
 
 ## Unreleased
 
+Mainnet readiness project (2026-11-17) — gate, wire fix, runbook. Read-only by construction.
+
+### Added
+
+- **`furlpay mainnet readiness|status|dry-run`** (`src/mainnet/gate.ts`) — a
+  read-only readiness gate: 13 prerequisite checks each labeled
+  `PASS`/`FAIL`/`BLOCKED`/`NOT_VERIFIED` with evidence (runtime, config,
+  master gate, signer presence, mainnet /info reachability, USDC peg sanity,
+  oracle agreement, Horizon, Solana RPC, risk limits, ledger writability,
+  Binance credentials, MCP policy). `exit 0` only when every blocking check
+  passes. The dry run evaluates a hypothetical order through the REAL
+  pre-trade risk engine against live metadata + L2 book and **never signs,
+  never submits, never records turnover** — pinned by test (only `/info` is
+  reachable from a dry run).
+- `MAINNET_READINESS_AUDIT.md` — source-audited gap log and the 12-subsystem
+  readiness matrix with evidence.
+- `MAINNET_TESTING_RUNBOOK.md` — the staged A/B/C/D protocol. Stage D (real
+  money) requires explicit transaction-specific human authorization per
+  order; nothing in the CLI trades autonomously.
+- `HyperliquidClient` gains an optional injected transport (non-breaking) so
+  exchange-client tests are hermetic.
+
+### Fixed
+
+- **HLP `vaultTransfer` wire scaling (HIGH — financial correctness).** The
+  action previously put the raw float on the wire; Hyperliquid requires
+  INTEGER micro-USDC (1e6) — `usd: 50` means $0.00005. Both deposit and
+  withdrawal now convert via `DecimalMath.parseUnits(…, 6)` and refuse
+  anything unrepresentable (>6 decimals, non-finite, ≤0, >$100M sanity
+  bound) instead of silently rounding money. Wire integer pinned by tests.
+- Verified-closed (pre-existing remediations confirmed in source + tests):
+  ETSS expired-escrow rehydration, durable HLP 4-day lockup (deposit records,
+  withdraw asserts, fail-closed), agent-key path containment, durable daily
+  turnover, honest SIMULATED labels for SDEX output.
+
+
+
 Documentation system build-out (source-audited, nothing invented).
 
 ### Added

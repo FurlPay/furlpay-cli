@@ -69,6 +69,9 @@ Every command accepts `--json` where output is structured. Global flags: `--env 
 | `furlpay solana balance <addr>` | Lamport balance via live RPC (base58-validated) |
 | `furlpay solana price <mint|alias>` | Jupiter liquidity-weighted USD price (SOL, USDC aliases) |
 | `furlpay solana quote <in> <out> <raw-amount>` | Indicative Jupiter route — labeled INDICATIVE, nothing in this build can fill it |
+| `furlpay mainnet readiness` | Every execution prerequisite, PASS/FAIL/BLOCKED/NOT_VERIFIED — exit 1 = not ready |
+| `furlpay mainnet status` | Per-surface network/mode/status snapshot (read-only) |
+| `furlpay mainnet dry-run <SYM> --side --size` | Real risk-engine evaluation of a hypothetical order — never signs, never submits |
 
 ## Verification & diagnostics
 
