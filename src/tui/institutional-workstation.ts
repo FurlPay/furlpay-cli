@@ -357,9 +357,11 @@ export class InstitutionalWorkstation {
     this.engine.clearBackBuffer();
 
     // ── 1. HEADER TELEMETRY BAR ───────────────────────────────────────────
+    // 2026-11-17 honesty fix: "RAILS: USDC / CCTP v2" claimed a Circle CCTP
+    // integration that does not exist in this build — the rail is USDC only.
     const statusFg = this.connectionStatus === "LIVE" ? "\x1b[32m" : "\x1b[31m";
     const modeBadge = `[${this.permissionMode.toUpperCase()}]`;
-    const headerStr = ` FURLPAY QUANT TERMINAL v2.0  •  VENUE: FURLPAY CORE L1  •  RAILS: USDC / CCTP v2  •  ${statusFg}● ${this.connectionStatus} (${this.latencyMs}ms)\x1b[0m  •  DRIFT: +${this.clockDriftMs}ms  •  MODE: ${modeBadge}`;
+    const headerStr = ` FURLPAY QUANT TERMINAL v2.0  •  VENUE: FURLPAY CORE L1  •  RAILS: USDC  •  ${statusFg}● ${this.connectionStatus} (${this.latencyMs}ms)\x1b[0m  •  DRIFT: +${this.clockDriftMs}ms  •  MODE: ${modeBadge}`;
     this.engine.writeString(0, 0, headerStr.padEnd(width), "\x1b[1m\x1b[37m", "\x1b[44m", true);
 
     // ── GRID COMPUTATIONS ─────────────────────────────────────────────────

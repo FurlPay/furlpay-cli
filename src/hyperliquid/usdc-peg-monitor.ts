@@ -87,15 +87,38 @@ export class UsdcPegMonitor {
 
   /**
    * Evaluates peg health and transitions state with hysteresis.
+   *
+   * 2026-11-17 audit closure: with zero fresh oracle readings this method no
+   * longer dresses the neutral fallback (priceUsd 1.0) up as a clean bill of
+   * health. It returns dataAvailable: false with an explicit reason, and a
+   * depeg/recovery halt already in force stays in force until REAL data
+   * proves recovery — an outage of the feed is never evidence of recovery.
    */
   public evaluatePeg(nowMs: number = Date.now()): {
     status: PegStatus;
     priceUsd: number;
     driftBps: number;
     tradingPermitted: boolean;
+    dataAvailable: boolean;
     reason?: string;
   } {
     const consensus = this.getConsensusPrice(nowMs);
+
+    if (consensus.sourcesCount === 0) {
+      const haltInForce = this.status !== "HEALTHY";
+      return {
+        status: this.status,
+        priceUsd: consensus.priceUsd,
+        driftBps: consensus.driftBps,
+        // No data is not depeg evidence (never halt on an outage), but an
+        // existing halt cannot be lifted by an outage either (fail-safe).
+        tradingPermitted: !haltInForce,
+        dataAvailable: false,
+        reason: haltInForce
+          ? "PEG_FEED_UNAVAILABLE during a depeg/recovery halt: no fresh USDC/USD data can prove recovery, so the halt stays in force."
+          : "PEG_FEED_UNAVAILABLE: no fresh USDC/USD oracle reading — the peg guardrail has nothing to evaluate. This is not a clean bill of health.",
+      };
+    }
 
     if (consensus.isDepegged) {
       this.status = "DEPEG_ALERT";
@@ -107,6 +130,7 @@ export class UsdcPegMonitor {
         priceUsd: consensus.priceUsd,
         driftBps: consensus.driftBps,
         tradingPermitted: false,
+        dataAvailable: true,
         reason: `USDC_DEPEG_HALT: External USDC/USD price \$${consensus.priceUsd.toFixed(4)} drifted ${consensus.driftBps.toFixed(1)} bps (threshold: ${UsdcPegMonitor.DEPEG_THRESHOLD_BPS} bps). Opening risk-increasing positions suspended.`,
       };
     }
@@ -131,6 +155,7 @@ export class UsdcPegMonitor {
             priceUsd: consensus.priceUsd,
             driftBps: consensus.driftBps,
             tradingPermitted: false,
+            dataAvailable: true,
             reason: `USDC_RECOVERING: Peg within hysteresis buffer (${consensus.driftBps.toFixed(1)} bps <= ${UsdcPegMonitor.RECOVERY_HYSTERESIS_BPS} bps). Stabilization cooldown: ${remainingSec}s remaining.`,
           };
         }
@@ -146,6 +171,7 @@ export class UsdcPegMonitor {
       priceUsd: consensus.priceUsd,
       driftBps: consensus.driftBps,
       tradingPermitted: this.status === "HEALTHY",
+      dataAvailable: true,
     };
   }
 

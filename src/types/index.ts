@@ -227,6 +227,8 @@ export interface PerpExecutionResult {
   notionalUsd: number;
   marginRequirementUsd: number;
   liquidationPriceEstimated: number;
+  /** Non-blocking risk observations (e.g. peg feed unavailable) — surfaced, never silent. */
+  riskWarnings?: string[];
   txHash: string;
   venue: "HYPERLIQUID_L1";
 }

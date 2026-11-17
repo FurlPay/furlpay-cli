@@ -9,6 +9,7 @@ Secrets live in environment variables or stdin — **never as CLI arguments** (a
 | `HYPERLIQUID_PRIVATE_KEY` | Perp execution, HLP vault | Preferred. Fails closed if absent on signed surfaces. Use a delegated **API Agent key**, not your master |
 | `ETH_PRIVATE_KEY` | Perp execution, HLP vault | Fallback signer |
 | `FURLPAY_HL_TESTNET` | Hyperliquid | `1` = testnet, `0` = mainnet — explicit, never silently swapped |
+| `FURLPAY_USDC_PEG_FEED_URL` | Pre-trade peg guardrail | USDC/USD feed for the depeg monitor; defaults to CoinGecko's simple price. Any https endpoint answering `{ "usd-coin": { "usd": <number> } }`. Refreshed at most once per 30s; a failed feed is surfaced as an explicit `PEG_FEED_UNAVAILABLE` warning on every order — never a synthetic price, and a depeg halt in force stays until real data proves recovery |
 
 ## Exchange credentials
 

@@ -1,7 +1,13 @@
 /**
  * Smart Order Router (SOR) for Stellar
  * Finds optimal multi-hop execution route across SDEX Order Books and Soroban AMMs.
+ *
+ * Money arithmetic (receive amounts, effective price, minimum received) is
+ * scaled-BigInt via DecimalMath; only the dimensionless impact/slippage
+ * ratios are floats, applied as integer basis points.
  */
+
+import { DecimalMath } from "../precision/decimal-math";
 
 export interface RouteHop {
   fromAsset: string;
@@ -65,13 +71,23 @@ export class SmartOrderRouter {
     const sPrice = priceMap[sCode] || 1.0;
     const tPrice = priceMap[tCode] || 100.0;
 
-    const notionalUsd = spendAmount * sPrice;
-    const rawExpectedUnits = notionalUsd / tPrice;
+    // Exact money math: notional and expected units as scaled-BigInt minors.
+    const notionalMinor = DecimalMath.mulMinor(
+      DecimalMath.parseUnits(spendAmount, 6),
+      DecimalMath.parseUnits(sPrice, 6)
+    );
+    const tPriceMinor = DecimalMath.parseUnits(tPrice, 6);
+    if (tPriceMinor === 0n) throw new Error("ROUTER_INVALID_TARGET_PRICE");
+    const rawExpectedMinor = DecimalMath.divMinor(notionalMinor, tPriceMinor);
 
-    // Price impact curve based on size
+    // Price impact curve based on size (dimensionless ratio → integer bps)
+    const notionalUsd = Number(notionalMinor) / 1e6;
     const priceImpactPct = Math.min(2.5, (notionalUsd / 100000) * 0.05);
-    const effectiveReceive = rawExpectedUnits * (1 - priceImpactPct / 100);
-    const minReceive = effectiveReceive * (1 - slippagePct / 100);
+    const impactBps = BigInt(Math.round(priceImpactPct * 100));
+    const BPS = 10_000n;
+    const effectiveReceiveMinor = (rawExpectedMinor * (BPS - impactBps)) / BPS;
+    const slipBps = BigInt(Math.round(slippagePct * 100));
+    const minReceiveMinor = (effectiveReceiveMinor * (BPS - slipBps)) / BPS;
 
     const hops: RouteHop[] = [];
 
@@ -102,15 +118,16 @@ export class SmartOrderRouter {
       });
     }
 
+    const effectiveReceive = Number(effectiveReceiveMinor) / 1e6;
     return {
       sourceAsset,
       targetAsset,
       sourceAmount: spendAmount,
       expectedReceiveAmount: Number(effectiveReceive.toFixed(7)),
-      effectivePrice: Number((spendAmount / effectiveReceive).toFixed(4)),
+      effectivePrice: effectiveReceive > 0 ? Number((spendAmount / effectiveReceive).toFixed(4)) : 0,
       priceImpactPct: Number(priceImpactPct.toFixed(3)),
       slippageTolerancePct: slippagePct,
-      minimumReceived: Number(minReceive.toFixed(7)),
+      minimumReceived: Number((Number(minReceiveMinor) / 1e6).toFixed(7)),
       hops,
       orderingProperties: {
         protocol: "SCP",

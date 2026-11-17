@@ -2,6 +2,11 @@
  * FurlPay CLI Dispatcher — Stellar Tokenized Equities & Hyperliquid Trading Infrastructure
  */
 
+// dotenv is a declared dependency that was never imported (2026-11-17
+// gap-closure): load ./.env if present so the documented env vars below work
+// without shell exports. Silently no-ops when the file is absent.
+import "dotenv/config";
+
 import { loadConfig, saveConfig, getConfigPath, DEFAULT_CONFIG } from "./config";
 import { LedgerSigner } from "./wallet/ledger";
 import { Sep7Connector } from "./wallet/walletconnect";
@@ -275,7 +280,10 @@ export class FurlPayStellarCli {
         const info = await ledger.probe();
         console.log(`[+] Found ${info.model} (Firmware v${info.firmwareVersion}, Stellar App v${info.appVersion})`);
         console.log(`[+] Public Key: ${info.publicKey}`);
-        console.log(`[+] Account validated. Balance: 14,500.00 USDC | 0.00 XLM (Sponsored Mode Active)`);
+        // 2026-11-17 honesty fix: the old line printed a fabricated
+        // "Balance: 14,500.00 USDC | 0.00 XLM (Sponsored Mode Active)" — no
+        // balance was ever queried. A device probe proves reachability only.
+        console.log(`[i] Device probe only — no balance was queried. Use a Horizon balance lookup for real funds.`);
         return;
       }
 

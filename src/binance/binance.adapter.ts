@@ -8,6 +8,7 @@ import {
   BinanceApiError,
 } from "./binance.client.js";
 import { credentialsFromEnv } from "./binance.auth.js";
+import { DecimalMath } from "../precision/decimal-math.js";
 import type {
   BinanceEnv,
   BinanceMarket,
@@ -172,7 +173,13 @@ export class BinanceAdapter implements ExchangeAdapter {
       throw new Error(`quantity must be a positive finite number, got ${String(quantity)}`);
     }
     const ticker = await this.client.ticker24h(symbol.toUpperCase());
-    const notionalUsd = qtyNum * parseFloat(ticker.lastPrice || "0");
+    // Exact notional for the mandate gate (scaled-BigInt, no float product).
+    const notionalUsd = Number(
+      DecimalMath.mulMinor(
+        DecimalMath.parseUnits(quantity, 6),
+        DecimalMath.parseUnits(ticker.lastPrice || "0", 6)
+      )
+    ) / 1e6;
     const intent: TradeIntent = {
       symbol: symbol.toUpperCase(),
       side: "SELL",

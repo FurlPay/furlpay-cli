@@ -784,7 +784,10 @@ export class FurlPayInteractiveTerminal {
       lines.push(`│  ${this.C_GRAY}Press [3] to prepare a new ticket · [ESC] to exit${this.C_RESET}                       │`);
     } else {
       lines.push(`│  ${this.C_WHITE}${this.C_BOLD}AUTHORIZE AND SUBMIT ORDER? (Human Gate)${this.C_RESET}                                      │`);
-      lines.push(`│  ${this.C_TURQUOISE}Press [y] to confirm & sign with KMS · [n] or [ESC] to reject${this.C_RESET}             │`);
+      // 2026-11-17 honesty fix: this terminal signs with the configured
+      // local key — "sign with KMS" implied a KMS integration that does not
+      // exist in this build.
+      lines.push(`│  ${this.C_TURQUOISE}Press [y] to confirm & sign with the configured key · [n] or [ESC] to reject${this.C_RESET}     │`);
     }
     lines.push(`╰──────────────────────────────────────────────────────────────────────────────╯`);
 

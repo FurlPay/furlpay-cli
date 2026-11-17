@@ -69,8 +69,20 @@ export class HyperliquidSigner {
 
   /**
    * Sign an L1 Action (order, cancel, updateLeverage, vaultTransfer) using the Phantom Agent scheme.
+   *
+   * Fail-closed security rule (ported from hyperliquid-signer.ts, 2026-11-17):
+   * administrative or withdrawal actions must never be signed through the
+   * L1 trading signer — the master key path (signUserAction) is the only
+   * legitimate route for those.
    */
   async signL1Action(action: any, nonce: number, vaultAddress?: string): Promise<HyperliquidSignature> {
+    const actionType = action?.type;
+    if (actionType === "withdraw3" || actionType === "usdSend" || actionType === "spotUser") {
+      throw new Error(
+        `SECURITY_VIOLATION: Trading signer cannot sign administrative or withdrawal action '${actionType}'. Master key required.`
+      );
+    }
+
     const connectionId = this.deriveConnectionId(action, nonce, vaultAddress);
 
     const domain = {

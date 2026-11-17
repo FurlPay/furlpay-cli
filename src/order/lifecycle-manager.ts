@@ -10,6 +10,7 @@
  */
 
 import crypto from "crypto";
+import { DecimalMath } from "../precision/decimal-math";
 
 export type OrderLifecycleState =
   | "CREATED"
@@ -129,7 +130,13 @@ export class OrderLifecycleManager {
    */
   public recordFill(orderId: string, fillSz: string, fillPx: string, feeUsd: string = "0"): void {
     const o = this.mustGetOrder(orderId);
-    const newFilled = (parseFloat(o.filledSize) + parseFloat(fillSz)).toFixed(4);
+    // Fill accumulation in scaled-BigInt minor units (no float drift across
+    // many partial fills).
+    const SIZE_DECIMALS = 4;
+    const newFilledMinor =
+      DecimalMath.parseUnits(o.filledSize, SIZE_DECIMALS) +
+      DecimalMath.parseUnits(fillSz, SIZE_DECIMALS);
+    const newFilled = DecimalMath.formatUnits(newFilledMinor, SIZE_DECIMALS);
     o.filledSize = newFilled;
     o.fills.push({
       fillSz,
@@ -138,8 +145,8 @@ export class OrderLifecycleManager {
       timestamp: Date.now(),
     });
 
-    const totalTarget = parseFloat(o.size);
-    if (parseFloat(newFilled) >= totalTarget) {
+    const totalTargetMinor = DecimalMath.parseUnits(o.size, SIZE_DECIMALS);
+    if (newFilledMinor >= totalTargetMinor) {
       o.state = "FILLED";
     } else {
       o.state = "PARTIALLY_FILLED";

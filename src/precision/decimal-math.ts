@@ -80,6 +80,38 @@ export class DecimalMath {
   }
 
   /**
+   * Multiply two already-scaled 6-dp minor-unit BigInts; result is 6-dp minor
+   * units (truncated toward zero). Engine-internal arithmetic uses this so no
+   * intermediate step ever leaves the integer domain.
+   */
+  public static mulMinor(aMinor: bigint, bMinor: bigint): bigint {
+    return (aMinor * bMinor) / 1_000_000n;
+  }
+
+  /**
+   * Divide two already-scaled 6-dp minor-unit BigInts; result is 6-dp minor
+   * units (truncated toward zero). Throws on zero divisor.
+   */
+  public static divMinor(aMinor: bigint, bMinor: bigint): bigint {
+    if (bMinor === 0n) throw new Error("DIVISION_BY_ZERO: Cannot divide by zero.");
+    return (aMinor * 1_000_000n) / bMinor;
+  }
+
+  /**
+   * Round a 6-dp minor-unit value to a 2-dp display string, half away from
+   * zero (matches legacy Number.toFixed(2) semantics without any float).
+   */
+  public static formatUsd2(minor6: bigint): string {
+    const negative = minor6 < 0n;
+    const abs = negative ? -minor6 : minor6;
+    const whole = abs / 10_000n; // 2dp minor units
+    const rem = abs % 10_000n;
+    const rounded = rem * 2n >= 10_000n ? whole + 1n : whole;
+    const sign = negative && rounded !== 0n ? "-" : "";
+    return `${sign}${rounded.toString().slice(0, -2) || "0"}.${rounded.toString().slice(-2).padStart(2, "0")}`;
+  }
+
+  /**
    * Discrete rounding to exact exchange tick size.
    * Example: price 92150.24 with tick 0.5 -> 92150.0
    *
@@ -155,12 +187,16 @@ export class DecimalMath {
   /**
    * Verified Protocol Liquidation Price (General-Purpose):
    * P_liq = P_entry - (s * M_available) / [Q * (1 - s * l)]
-   * 
+   *
    * Where:
    * - s: +1 for Long, -1 for Short
    * - Q: absolute position size
    * - M_available: available margin buffer (Account Value - MMR for cross, Assigned - MMR for isolated)
    * - l: maintenance margin rate (1 / 2*maxLeverage)
+   *
+   * Integer-minor arithmetic end to end (2026-11-17 audit): the maintenance
+   * rate enters as a 9-dp scaled BigInt, so the only approximations left are
+   * the documented 9-dp quantization of `l` and the final 2-dp display round.
    */
   public static computeProtocolLiquidationPrice(
     entryPxStr: string | number,
@@ -169,24 +205,34 @@ export class DecimalMath {
     isBuy: boolean,
     maintenanceMarginRate: number
   ): string {
-    const P_entry = typeof entryPxStr === "number" ? entryPxStr : parseFloat(entryPxStr);
-    const Q = Math.abs(typeof positionSizeStr === "number" ? positionSizeStr : parseFloat(positionSizeStr));
-    const M_available = typeof availableMarginStr === "number" ? availableMarginStr : parseFloat(availableMarginStr);
-    const s = isBuy ? 1 : -1;
-    const l = maintenanceMarginRate;
+    const P6 = DecimalMath.parseUnits(entryPxStr, 6);
+    const Q6 = DecimalMath.parseUnits(Math.abs(Number(positionSizeStr)), 6);
+    const M6 = DecimalMath.parseUnits(availableMarginStr, 6);
+    const s = isBuy ? 1n : -1n;
 
-    if (Q === 0) return "0.00";
+    if (Q6 === 0n) return "0.00";
 
-    const denominator = Q * (1.0 - s * l);
-    if (denominator <= 0) return "0.00";
+    const RATE_SCALE = 1_000_000_000n; // 9 dp for the maintenance rate
+    const l9 = DecimalMath.parseUnits(maintenanceMarginRate, 9);
+    const oneMinus = RATE_SCALE - s * l9; // (1 - s*l) scaled by 10^9
+    if (oneMinus <= 0n) return "0.00";
 
-    const P_liq = P_entry - (s * M_available) / denominator;
-    return Math.max(0, P_liq).toFixed(2);
+    // delta6 = (s*M / (Q*(1-sl))) * 10^6 = s*M6 * 10^15 / (Q6 * (1 - s*l))
+    const delta6 = (s * M6 * RATE_SCALE * 1_000_000n) / (Q6 * oneMinus);
+    const liq6 = P6 - delta6;
+    if (liq6 <= 0n) return "0.00";
+    return DecimalMath.formatUsd2(liq6);
   }
 
   /**
    * Standard Liquidation Price (Isolated Margin with zero extra collateral):
-   * P_liq = Entry * (1 - s/L) / (1 - s*l)
+   * P_liq = Entry * (1 - s/L) / (1 - s*l), l = 1/(2*maxLeverage)
+   *
+   * With integer leverage and maxLeverage the rate is an exact rational, so
+   * the whole equation is evaluated in BigInt minor units with no float step:
+   *   buy:  Entry * (L-1) * 2ML / [ L * (2ML - 1) ]
+   *   sell: Entry * (L+1) * 2ML / [ L * (2ML + 1) ]
+   * Fractional leverage inputs fall back to a documented float path.
    */
   public static computeLiquidationPrice(
     entryPxStr: string | number,
@@ -194,16 +240,58 @@ export class DecimalMath {
     isBuy: boolean,
     maxLeverage: number = 50
   ): string {
-    const entry = typeof entryPxStr === "number" ? entryPxStr : parseFloat(entryPxStr);
-    const l = DecimalMath.maintenanceMarginRate(maxLeverage);
-
-    let liq = 0;
-    if (isBuy) {
-      liq = entry * ((1.0 - 1.0 / leverage) / (1.0 - l));
-    } else {
-      liq = entry * ((1.0 + 1.0 / leverage) / (1.0 + l));
+    if (!Number.isInteger(leverage) || !Number.isInteger(maxLeverage) || maxLeverage <= 0) {
+      const entry = typeof entryPxStr === "number" ? entryPxStr : parseFloat(entryPxStr);
+      const l = DecimalMath.maintenanceMarginRate(maxLeverage);
+      let liq = 0;
+      if (isBuy) {
+        liq = entry * ((1.0 - 1.0 / leverage) / (1.0 - l));
+      } else {
+        liq = entry * ((1.0 + 1.0 / leverage) / (1.0 + l));
+      }
+      return Math.max(0, liq).toFixed(2);
     }
-    return Math.max(0, liq).toFixed(2);
+
+    const entry6 = DecimalMath.parseUnits(entryPxStr, 6);
+    const L = BigInt(leverage);
+    const ML2 = BigInt(2 * maxLeverage);
+    const numerator = isBuy ? (L - 1n) * ML2 : (L + 1n) * ML2;
+    const denominator = L * (isBuy ? ML2 - 1n : ML2 + 1n);
+
+    const liq6 = (entry6 * numerator) / denominator;
+    if (liq6 <= 0n) return "0.00";
+    return DecimalMath.formatUsd2(liq6);
+  }
+
+  /**
+   * Cross-margined liquidation estimate used by the Hyperliquid perp service:
+   * P_liq = Entry * (1 - s/L + s*mmf) with a fixed maintenance margin
+   * fraction (0.03 default), evaluated exactly in scaled BigInt:
+   *   factor = (100L -/+ 100L*mmf +/- 100) / (100L)
+   * All terms are carried at consistent 4-dp minor scale.
+   */
+  public static computeCrossLiquidationPrice(
+    entryPxStr: string | number,
+    leverage: number,
+    isBuy: boolean,
+    maintenanceMarginFraction: number = 0.03
+  ): string {
+    const entry6 = DecimalMath.parseUnits(entryPxStr, 6);
+    const L4 = DecimalMath.parseUnits(leverage, 4);
+    const F4 = DecimalMath.parseUnits(maintenanceMarginFraction, 4);
+    const SCALE4 = 10_000n;
+    const H4 = DecimalMath.parseUnits(100, 4); // 100 at 4-dp scale
+
+    if (entry6 === 0n || L4 === 0n) return "0.00";
+
+    const base = H4 * L4; // 100L, scale 10^8
+    const mmTerm = (base * F4) / SCALE4; // 100L*mmf, back to scale 10^8
+    const flatTerm = H4 * SCALE4; // 100, scale 10^8
+    const numerator = isBuy ? base + mmTerm - flatTerm : base - mmTerm + flatTerm;
+
+    const liq6 = (entry6 * numerator) / base;
+    if (liq6 <= 0n) return "0.00";
+    return DecimalMath.formatUsd2(liq6);
   }
 
   /**

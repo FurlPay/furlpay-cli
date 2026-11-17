@@ -183,4 +183,10 @@ export interface RiskCheckResult {
   reason?: string;
   marginRatio?: number;
   distanceToLiquidationPct?: number;
+  /**
+   * Non-blocking observations the caller should surface (2026-11-17 audit):
+   * e.g. the USDC peg feed being unavailable — the order still passes on a
+   * healthy monitor, but never silently.
+   */
+  warnings?: string[];
 }

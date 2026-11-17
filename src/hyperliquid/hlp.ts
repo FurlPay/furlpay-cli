@@ -12,6 +12,7 @@ import { HlpVaultInfo, HlpDepositResult } from "../types";
 import { HyperliquidClient } from "./client";
 import { HyperliquidSigner } from "./signer";
 import { HyperliquidNetwork, HyperliquidVaultDetails } from "./types";
+import { DecimalMath } from "../precision/decimal-math";
 
 export class HlpVaultService {
   private client: HyperliquidClient;
@@ -119,9 +120,16 @@ export class HlpVaultService {
     const stats = await this.getHlpStats(activeSigner.getAddress());
     // The exchange computes actual minted shares at settlement; a client-side
     // estimate is only shown when a live share price is genuinely available.
+    // Exact division via DecimalMath (no float in the estimate).
     const sharesMinted = stats.sharePriceUsd === null
       ? null
-      : Number((amountUsd / stats.sharePriceUsd).toFixed(6));
+      : Number(
+          DecimalMath.div(
+            amountUsd,
+            stats.sharePriceUsd,
+            6
+          )
+        );
 
     const action = {
       type: "vaultTransfer",

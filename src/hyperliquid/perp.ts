@@ -17,6 +17,7 @@ import { HyperliquidClient } from "./client";
 import { HyperliquidSigner } from "./signer";
 import { HyperliquidRiskEngine } from "./risk-engine";
 import { HyperliquidNetwork, HyperliquidOpenOrder, HyperliquidUserFill } from "./types";
+import { DecimalMath } from "../precision/decimal-math";
 
 export interface HyperliquidPerpConfig {
   network?: HyperliquidNetwork;
@@ -55,16 +56,11 @@ export class HyperliquidPerpService {
 
   /**
    * Calculate deterministic estimated liquidation price for cross-margined perpetual position.
+   * Integer-exact via DecimalMath (no IEEE-754 in the estimate).
    */
   calculateLiquidationPrice(entryPrice: number, leverage: number, side: "buy" | "sell"): number {
-    const maintenanceMarginFraction = 0.03; // 3% maintenance margin
-    if (side === "buy") {
-      const liq = entryPrice * (1 - 1 / leverage + maintenanceMarginFraction);
-      return Math.max(0, Number(liq.toFixed(2)));
-    } else {
-      const liq = entryPrice * (1 + 1 / leverage - maintenanceMarginFraction);
-      return Number(liq.toFixed(2));
-    }
+    const liq = DecimalMath.computeCrossLiquidationPrice(entryPrice, leverage, side === "buy");
+    return Number(liq);
   }
 
   /**
@@ -111,7 +107,18 @@ export class HyperliquidPerpService {
       orderTypeWire = { limit: { tif: "Gtc" } };
     }
 
-    // Run Pre-Trade Risk Evaluation
+    // Run Pre-Trade Risk Evaluation — with live account state so the margin
+    // buffer check actually executes (2026-11-17 audit: the check was gated
+    // on an optional userState that was never supplied, so insufficient
+    // equity could pass straight through to a signed order).
+    let userState;
+    try {
+      userState = await this.client.getClearinghouseState(activeSigner.getAddress());
+    } catch (e: any) {
+      throw new Error(
+        `Pre-Trade Risk Check Refused: clearinghouse state for ${activeSigner.getAddress()} could not be fetched (${e?.message || e}). Margin check cannot run — refusing to sign, fail-closed.`
+      );
+    }
     const riskCheck = await this.riskEngine.evaluatePreTrade({
       coin: cleanCoin,
       side: params.side,
@@ -119,11 +126,15 @@ export class HyperliquidPerpService {
       price: targetPrice,
       leverage: params.leverage,
       client: this.client,
+      userState,
     });
 
     if (!riskCheck.passed) {
       throw new Error(`Pre-Trade Risk Check Refused: ${riskCheck.reason}`);
     }
+    // Non-blocking risk observations (e.g. peg feed unavailable) ride along —
+    // the order proceeds, but the caller sees why the risk engine flagged it.
+    const riskWarnings = riskCheck.warnings;
 
     // Format wire fields matching precision rules
     const wirePrice = this.client.formatPrice(targetPrice);
@@ -172,8 +183,14 @@ export class HyperliquidPerpService {
       }
     }
 
-    const notionalUsd = Number((params.size * fillPrice).toFixed(2));
-    const marginRequirementUsd = Number((notionalUsd / params.leverage).toFixed(2));
+    const notionalMinor = DecimalMath.mulMinor(
+      DecimalMath.parseUnits(params.size, 6),
+      DecimalMath.parseUnits(fillPrice, 6)
+    );
+    const notionalUsd = Number(notionalMinor) / 1e6;
+    const marginRequirementUsd = Number(
+      DecimalMath.divMinor(notionalMinor, DecimalMath.parseUnits(params.leverage, 6))
+    ) / 1e6;
     const liquidationPriceEstimated = this.calculateLiquidationPrice(fillPrice, params.leverage, params.side);
 
     return {
@@ -186,6 +203,7 @@ export class HyperliquidPerpService {
       notionalUsd,
       marginRequirementUsd,
       liquidationPriceEstimated,
+      riskWarnings,
       txHash: cloid, // Client order id serves as verified audit token
       venue: "HYPERLIQUID_L1",
     };
