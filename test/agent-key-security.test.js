@@ -247,3 +247,24 @@ test("agent key: no plaintext 'secretKey' field ever written to disk", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── External audit 2026-11-17b H-02 ─────────────────────────────────────
+test("audit H-02: agent names cannot traverse the policy directory", () => {
+  const { dir, svc } = tmpService();
+  const evil = ["../../escaped", "..\..\escaped", "a/b", "with space", ".", "..", "a".repeat(65)];
+  for (const name of evil) {
+    assert.throws(
+      () => svc.generateAgentKey({ name, dailyLimit: 10, allowedAssets: ["USDC"] }),
+      /Invalid agent name|Path traversal/,
+      `generate must refuse ${JSON.stringify(name)}`
+    );
+    assert.throws(() => svc.loadAgentPolicy(name), /Invalid agent name|Path traversal/);
+  }
+  // Nothing escaped the policy dir.
+  const parent = path.dirname(dir);
+  const created = fs.readdirSync(parent).filter((d) => d.startsWith("escaped") || d.includes("malicious"));
+  assert.strictEqual(created.length, 0, "no files written outside the policy dir");
+  // A legal name still works.
+  const gen = svc.generateAgentKey({ name: "good-agent_1", dailyLimit: 10, allowedAssets: ["USDC"] });
+  assert.ok(gen.policy.agentName === "good-agent_1");
+});

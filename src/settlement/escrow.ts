@@ -80,11 +80,19 @@ export class EscrowStateMachine {
   private settlementTxHash?: string;
   private auditLog: EscrowTransitionRecord[] = [];
 
-  constructor(terms: EscrowTerms) {
+  /**
+   * @param rehydrate true only when reconstructing a PERSISTED snapshot
+   *  (deserialize). Creation must refuse past expiries; rehydration must
+   *  not — an escrow that has since expired is exactly the one whose
+   *  refund flow must keep working (external audit 2026-11-17b C-01: the
+   *  constructor threw on load, bricking every expired escrow's collateral
+   *  forever).
+   */
+  constructor(terms: EscrowTerms, rehydrate = false) {
     if (!terms.escrowId) throw new Error("escrowId is required.");
     if (!terms.buyer || !terms.seller) throw new Error("Buyer and seller addresses are required.");
     if (parseFloat(terms.amount) <= 0) throw new Error("Escrow amount must be positive.");
-    if (terms.expiryTimestamp <= Math.floor(Date.now() / 1000)) {
+    if (!rehydrate && terms.expiryTimestamp <= Math.floor(Date.now() / 1000)) {
       throw new Error("Expiry timestamp must be in the future.");
     }
 
@@ -99,6 +107,7 @@ export class EscrowStateMachine {
     return this.state;
   }
 
+  /** Terms accessor (read-only view for callers and rehydration paths). */
   getTerms(): EscrowTerms {
     return { ...this.terms };
   }
@@ -407,7 +416,7 @@ export class EscrowStateMachine {
       throw new Error(`Invalid escrow snapshot: unknown state '${snapshot.state}'.`);
     }
 
-    const machine = new EscrowStateMachine({ ...snapshot.terms });
+    const machine = new EscrowStateMachine({ ...snapshot.terms }, true);
     (machine as any).state = snapshot.state;
     machine.auditLog = Array.isArray(snapshot.auditLog)
       ? snapshot.auditLog.map((r) => ({ ...r }))

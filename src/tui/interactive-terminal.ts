@@ -20,7 +20,7 @@ import { MarketDiscoveryService, UnifiedMarket } from "../market/discovery";
 import { HyperliquidClient } from "../hyperliquid/client";
 import { MarketDataService } from "../services/market-data";
 import { HlpVaultService } from "../hyperliquid/hlp";
-import { HyperliquidRiskEngine } from "../hyperliquid/risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "../hyperliquid/risk-engine";
 import { DiscoveredMarket, SupportStatus } from "../market/types";
 import { HawkesVolatilityEstimator } from "../services/hawkes";
 import { furlPayStore, PermissionMode, ActiveTradeTicket } from "./store/furlpay-store";
@@ -116,7 +116,7 @@ export class FurlPayInteractiveTerminal {
     this.hlClient = new HyperliquidClient("mainnet");
     this.marketData = new MarketDataService("mainnet");
     this.hlpService = new HlpVaultService("mainnet");
-    this.riskEngine = new HyperliquidRiskEngine();
+    this.riskEngine = new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
     this.hawkes = new HawkesVolatilityEstimator({ mu: 0.18, alpha: 0.42, beta: 0.70 });
     this.aiChatEngine = new AiChatEngine({ discovery: this.discovery, hawkes: this.hawkes });
 

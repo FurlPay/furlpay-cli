@@ -29,7 +29,7 @@ import { HlpVaultService } from "./hyperliquid/hlp";
 import { HyperliquidPerpService } from "./hyperliquid/perp";
 import { HyperliquidClient } from "./hyperliquid/client";
 import { MarketDataService } from "./services/market-data";
-import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
 import { EscrowStore } from "./settlement/escrowStore";
 import { sanitizeTerminal } from "./tui/sanitize";
@@ -37,6 +37,7 @@ import { verifyTransaction, TxVerificationResult } from "./stellar/txVerify";
 import { requestFunds, isValidStellarAddress, FaucetResult, FaucetNetwork } from "./stellar/faucet";
 import { validateConfig } from "./config/validate";
 import { BinanceAdapter } from "./binance/binance.adapter";
+import { DurableEventStore, defaultBlotterPath } from "./blotter/durable-event-store";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -170,7 +171,7 @@ export class FurlPayStellarCli {
     this.perp = new HyperliquidPerpService();
     this.marketData = new MarketDataService();
     this.hlClient = new HyperliquidClient();
-    this.riskEngine = new HyperliquidRiskEngine();
+    this.riskEngine = new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
   }
 
   async run(cliArgs: ParsedCliArgs): Promise<void> {
@@ -436,7 +437,15 @@ export class FurlPayStellarCli {
           price: (price || (clean === "JQQQ" ? 104.2 : 1.0)).toString(),
           sponsor: flags.sponsor !== false,
         });
-        console.log(`[✓] Stellar SDEX Trade Executed! Filled ${result.filledAmount} ${clean} @ \$${result.price}`);
+        // Honesty first (external audit 2026-11-17b H-03): a simulated fill
+        // is a labeled simulation, never a green checkmark claiming a real
+        // broadcast. `result.simulated` is authoritative.
+        if (result.simulated) {
+          console.log(`[!] SIMULATED Stellar SDEX Trade — no transaction was built, signed or broadcast to Stellar.`);
+          console.log(`[i] Simulated fill: ${result.filledAmount} ${clean} @ \$${result.price} | sim hash: ${result.txHash?.slice(0, 14) ?? "n/a"}…`);
+        } else {
+          console.log(`[✓] Stellar SDEX Trade Executed! Filled ${result.filledAmount} ${clean} @ \$${result.price}`);
+        }
         return;
       } else {
         const result = await this.perp.executePerpOrder({
@@ -764,8 +773,12 @@ export class FurlPayStellarCli {
 
     if (sub === "kill-switch") {
       console.log(`[!] INITIATING EMERGENCY TRADING KILL SWITCH...`);
-      const res = await this.perp.triggerKillSwitch();
-      console.log(`[✓] KILL SWITCH COMPLETE:`);
+      // --symbol scopes the blast radius (external audit M-05): the panic
+      // hotkey says "--symbol BTC" — the CLI must honor it, not liquidate
+      // the whole book.
+      const scope = flags.symbol || flags["symbol"];
+      const res = await this.perp.triggerKillSwitch(undefined, scope);
+      console.log(`[✓] KILL SWITCH COMPLETE${res.scopedTo ? ` (SCOPED TO ${res.scopedTo})` : " (ACCOUNT-WIDE)"}:`);
       console.log(`    - Canceled Orders:   ${res.canceledOrders}`);
       console.log(`    - Closed Positions:  [${res.closedPositions.join(", ") || "None"}]`);
       return;
@@ -790,11 +803,48 @@ export class FurlPayStellarCli {
       console.error(`[!] Unknown FURLPAY_BINANCE_ENV "${envRaw}" — using testnet (explicit values: testnet, mainnet).`);
     }
 
-    const adapter = new BinanceAdapter({ env });
+    // Durable audit blotter (M-02): Binance intents/outcomes land in the
+    // same hash-chained ledger as the Hyperliquid path. Creation failure
+    // degrades to an in-memory blotter (best-effort audit, never a blocker).
+    const binanceBlotter = (() => {
+      try {
+        return new DurableEventStore({ filePath: defaultBlotterPath() });
+      } catch {
+        return new DurableEventStore();
+      }
+    })();
+    const adapter = new BinanceAdapter({ env, blotter: binanceBlotter });
 
     // Agent-trust gate: with a delegated policy, orders validate + record
     // spend through AgentKeyService before the adapter builds a request.
+    // WITHOUT a delegated policy (external audit 2026-11-17b H-01) the old
+    // gate silently auto-authorized — a live, uncapped market order from a
+    // single command. Now: interactive humans confirm; non-interactive
+    // callers must carry explicit --yes, or the order is refused.
     const walletName = flags.wallet || flags["wallet"];
+    const requireUnmandatedConsent = async (what: string): Promise<void> => {
+      if (walletName) return; // delegated policy authorizes below
+      if (flags.yes === true || flags.y === true) {
+        console.error(`[!] Unmandated ${what} executed with explicit --yes consent (no spend cap active).`);
+        return;
+      }
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error(
+          `UNMANDATED_EXECUTION_REFUSED: ${what} without --wallet <agent> would bypass every spend cap. ` +
+            `Pass --yes to accept uncapped live execution explicitly, or create a delegated policy ` +
+            `(\`furlpay wallet agent-keygen\`) and use --wallet <agent>.`
+        );
+      }
+      // Interactive human: re-engage on the exact economics before money moves.
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((res) => {
+        rl.question(`Execute REAL-MONEY ${what}? Type "execute" to confirm: `, res);
+      });
+      rl.close();
+      if (answer.trim().toLowerCase() !== "execute") {
+        throw new Error(`Confirmation did not match — ${what} aborted.`);
+      }
+    };
     const mandateCheck = (intent: { symbol: string; side: string; notionalUsd: number }) => {
       if (!walletName) return { authorized: true };
       const gate = this.agentKeys.validateAndRecordSpend(walletName, intent.notionalUsd, "USDC");
@@ -836,6 +886,7 @@ export class FurlPayStellarCli {
         if (!Number.isFinite(quote) || quote <= 0) {
           throw new Error("Market buys require --quote <usd> (a positive quote amount).");
         }
+        await requireUnmandatedConsent(`market BUY ${symbol.toUpperCase()} for $${quote} on Binance (${env})`);
         const res = await adapter.marketOrder(
           { symbol, side: "BUY", notionalUsd: quote, agentAddress: walletName || "cli" },
           mandateCheck
@@ -847,6 +898,7 @@ export class FurlPayStellarCli {
       if (!qty) {
         throw new Error("Market sells require --qty <quantity> (an exact base quantity; never derived from a float price).");
       }
+      await requireUnmandatedConsent(`market SELL ${symbol.toUpperCase()} x${qty} on Binance (${env})`);
       const res = await adapter.marketSell(symbol, qty, mandateCheck);
       console.log(`[✓] Market SELL ${symbol.toUpperCase()} — ${res.status} (orderId ${res.orderId}, ${env})`);
       return;

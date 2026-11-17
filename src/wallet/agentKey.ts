@@ -49,6 +49,23 @@ export class AgentKeyService {
     }
   }
 
+  /**
+   * Policy names are FILENAMES (external audit 2026-11-17b H-02): a name
+   * like "../../malicious" or "..\\..\\malicious" must never reach
+   * path.join. Strict charset + resolved-path containment, fail closed.
+   */
+  private policyFilePath(name: string): string {
+    if (typeof name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(name)) {
+      throw new Error("Invalid agent name: must be 1-64 alphanumeric characters, underscores, or dashes.");
+    }
+    const resolved = path.resolve(this.policyDir, `${name}.json`);
+    const container = path.resolve(this.policyDir) + path.sep;
+    if (!resolved.startsWith(container)) {
+      throw new Error("Path traversal detected in agent name — refusing.");
+    }
+    return resolved;
+  }
+
   // ── OS-bound sealing key ─────────────────────────────────────────────
 
   private dpapiProtect(input: Buffer, unprotect: boolean): Buffer {
@@ -235,7 +252,7 @@ export class AgentKeyService {
       lastSpendDay: new Date().toISOString().slice(0, 10),
     };
 
-    const filePath = path.join(this.policyDir, `${opts.name}.json`);
+    const filePath = this.policyFilePath(opts.name);
     fs.writeFileSync(
       filePath,
       JSON.stringify(
@@ -292,7 +309,7 @@ export class AgentKeyService {
   }
 
   private loadAgentPolicyFile(name: string): { policy: AgentPolicy; sealedSecret?: string; secretKey?: string; createdAt?: string } | null {
-    const filePath = path.join(this.policyDir, `${name}.json`);
+    const filePath = this.policyFilePath(name);
     if (!fs.existsSync(filePath)) return null;
     try {
       return JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -362,7 +379,7 @@ export class AgentKeyService {
    * against the same pre-spend balance. Returns the validation verdict.
    */
   validateAndRecordSpend(name: string, amountUsd: number, assetCode: string): { allowed: boolean; reason?: string } {
-    const filePath = path.join(this.policyDir, `${name}.json`);
+    const filePath = this.policyFilePath(name);
     const lockPath = filePath + ".lock";
     const deadline = Date.now() + 10_000;
     let lockFd: number | null = null;
@@ -419,7 +436,7 @@ export class AgentKeyService {
 
   /** Atomic (tmp+rename) policy write, 0600, secrets always sealed. */
   private persistAgentPolicyFile(name: string, data: { policy: AgentPolicy; sealedSecret: string }): void {
-    const filePath = path.join(this.policyDir, `${name}.json`);
+    const filePath = this.policyFilePath(name);
     const payload = JSON.stringify({ policy: data.policy, sealedSecret: data.sealedSecret, updatedAt: new Date().toISOString() }, null, 2);
     const tmp = filePath + "." + crypto.randomUUID() + ".tmp";
     fs.writeFileSync(tmp, payload, { flag: "wx", mode: 0o600 });

@@ -21,7 +21,7 @@ import { HlpVaultService } from "../hyperliquid/hlp";
 import { HyperliquidPerpService } from "../hyperliquid/perp";
 import { MarketDiscoveryService } from "../market/discovery";
 import { MarketDataService } from "../services/market-data";
-import { HyperliquidRiskEngine } from "../hyperliquid/risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "../hyperliquid/risk-engine";
 import { HyperliquidClient } from "../hyperliquid/client";
 import { FinanceManager } from "../finance/manager";
 import { sanitizeUntrusted, sanitizeNumeric, canonicalArgsHash } from "./sanitize";
@@ -113,7 +113,7 @@ export class McpStdioServer {
     this.perpService = new HyperliquidPerpService();
     this.discovery = new MarketDiscoveryService();
     this.marketData = new MarketDataService();
-    this.riskEngine = new HyperliquidRiskEngine();
+    this.riskEngine = new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
     this.hlClient = new HyperliquidClient();
   }
 
