@@ -23,7 +23,7 @@ furlpay trade terminal --pair JQQQ/USDC
 
 ## Live Documentation
 
-**📖 https://furlpay.github.io/furlpay-cli/** — the full docs site (VitePress, auto-deployed from `main` on every change to `docs-site/`).
+**https://furlpay.github.io/furlpay-cli/** — the full docs site (VitePress, auto-deployed from `main` on every change to `docs-site/`).
 
 | Section | What's in it |
 |---|---|
