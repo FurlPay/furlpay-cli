@@ -6,6 +6,65 @@ This project follows [Semantic Versioning](https://semver.org/). While the
 version is `0.x`, the public CLI surface may still change between minor
 releases; patch releases are always safe to take.
 
+## Unreleased
+
+Remediation of the 2026-11-17 external audit verification (gap-closure branch).
+
+### Security
+
+- **Risk engine is fail-closed.** The fat-finger guard's empty `catch`
+  silently skipped the check on L2-book failures; asset-metadata failures
+  crashed instead of refusing; and the margin buffer check was gated on an
+  optional `userState` the live path never supplied, so insufficient equity
+  passed straight through to a signed order. All three now refuse the order
+  (`RISK_UNAVAILABLE: … fail-closed`), and `executePerpOrder` fetches live
+  clearinghouse state before every evaluation — failing closed if it can't.
+- **Trading signer refuses administrative actions.** The production L1
+  signer inherits the admin-action guard: `withdraw3` / `usdSend` /
+  `spotUser` throw `SECURITY_VIOLATION` on the trading-key path; the master
+  key route (`signUserAction`) remains the only legitimate one.
+
+### Added
+
+- **Live USDC peg guardrail.** `UsdcPegMonitor.updatePrice()` was never
+  called anywhere, so the depeg monitor sat at zero readings forever and its
+  neutral fallback read as a permanent clean bill of health. Every pre-trade
+  evaluation now ingests USDC/USD via `UsdcPegFeed` (CoinGecko simple-price
+  default; `FURLPAY_USDC_PEG_FEED_URL` override — https-only, 5s timeout,
+  sanity-bounded, refreshed at most once per 30s). Drift > 25 bps halts
+  risk-increasing orders with the 5-minute recovery hysteresis. A feed
+  outage is never depeg evidence — and never recovery evidence: a halt in
+  force persists until real data proves recovery. Orders that pass without
+  fresh peg data carry an explicit `PEG_FEED_UNAVAILABLE` warning, surfaced
+  as `riskWarnings` on `PerpExecutionResult`.
+- `.env.example` documenting every environment variable, and `dotenv` is
+  actually loaded so documented vars work without shell exports.
+
+### Fixed
+
+- **Money math on trading paths is scaled-BigInt end to end.** Risk-engine
+  notional/turnover/margin, perp notional/margin/liquidation estimates, HLP
+  share estimates, the Binance mandate-gate notional, SOR receive/minimum
+  amounts, and order fill accumulation all moved off IEEE-754 products of
+  floats onto `DecimalMath` (6-dp minor units); the previously orphaned
+  module is now load-bearing. `computeLiquidationPrice` /
+  `computeProtocolLiquidationPrice` are integer-exact for integer leverage.
+- **The "durable" event store actually persists.** File-backed appends
+  through atomic temp-file+rename (`~/.furlpay/blotter/events.json`), schema
+  and hash-chain verification on load, and corrupt or invalid ledgers refuse
+  to extend rather than silently truncating. The bare constructor stays
+  in-memory for tests (`isPersistent()` distinguishes).
+- **Honesty copy:** the fabricated `wallet connect ledger` balance line
+  ("Balance: 14,500.00 USDC"), the CCTP-v2 rail claim in the quant-terminal
+  header, and the "sign with KMS" confirmation copy are corrected to what
+  the build actually does.
+
+### Docs
+
+- Honesty matrix (README + docs site) gains a dedicated peg-guardrail row and
+  a fail-closed note on perp execution; the Hyperliquid guide documents the
+  risk engine's fail-closed semantics and the peg feed.
+
 ## 0.4.0 — 2026-11-13
 
 > Note: the `0.3.x` line was developed in the internal monorepo and never

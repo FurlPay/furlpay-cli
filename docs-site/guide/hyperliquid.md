@@ -23,6 +23,21 @@ furlpay trading limits --max-single-order 25 --max-leverage 3
 furlpay trading kill-switch --symbol BTC
 ```
 
+The engine is **fail-closed**: if the asset-metadata, L2-book or
+clearinghouse-state queries fail, the order is refused — a guard that cannot
+see the market never approves into it. The margin check runs against your
+live account state on every order.
+
+A **USDC peg guardrail** also runs before every order. USDC/USD is fetched
+from a public price feed (CoinGecko by default; point
+`FURLPAY_USDC_PEG_FEED_URL` at any https endpoint answering
+`{ "usd-coin": { "usd": <number> } }`, e.g. your own oracle aggregator),
+refreshed at most once per 30s. Drift beyond 25 bps halts risk-increasing
+orders until the peg holds within 15 bps for 5 minutes. A feed outage is
+never treated as depeg evidence — but it can't lift a halt either, and every
+order placed without fresh peg data carries an explicit
+`PEG_FEED_UNAVAILABLE` warning in its result (`riskWarnings`).
+
 ## Market data (no signer needed)
 
 ```bash
