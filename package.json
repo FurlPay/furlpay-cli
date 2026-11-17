@@ -2,7 +2,7 @@
   "name": "@furlpay/cli",
   "version": "0.4.0",
   "mcpName": "io.github.FurlPay/furlpay-cli",
-  "description": "FurlPay CLI — Stellar tokenized equities & Hyperliquid institutional trading infrastructure, gasless SDEX/Soroban execution, x402 micropayments, ETSS escrow and MCP server.",
+  "description": "FurlPay CLI \u2014 Hyperliquid perp execution (live, signed), Stellar SDEX/Soroban trade tooling and SEP-8 issuer surfaces (clearly labeled simulation), x402 micropayment tooling, a fail-closed local finance ledger, and an MCP server that is read-only by default.",
   "author": "FurlPay <engineering@furlpay.io>",
   "license": "MIT",
   "repository": {
