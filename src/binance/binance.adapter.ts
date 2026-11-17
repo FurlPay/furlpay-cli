@@ -9,6 +9,7 @@ import {
 } from "./binance.client.js";
 import { credentialsFromEnv } from "./binance.auth.js";
 import { DecimalMath } from "../precision/decimal-math.js";
+import { assertLiveAllowed } from "../capabilities/registry.js";
 import type {
   BinanceEnv,
   BinanceMarket,
@@ -137,6 +138,10 @@ export class BinanceAdapter implements ExchangeAdapter {
     if (!gate.authorized) {
       throw new Error(`POLICY_REFUSED: ${gate.reason ?? "mandate declined this order"}`);
     }
+    // Capability registry live gate (readiness P1): a refused or unopted
+    // build never signs an exchange order — the gate fires before any HTTP
+    // request is built.
+    assertLiveAllowed("binance.spot");
     // Market buy: spend quote (USDT) amount. Market sell: base quantity is
     // required by the exchange; we refuse to derive it silently from a float
     // price and require the caller to send a quantity-bearing intent instead.

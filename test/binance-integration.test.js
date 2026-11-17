@@ -3,6 +3,11 @@
 // separation, and the agent-trust gate. Everything here runs against stubbed
 // transport; live/testnet verification is BLOCKED on credentials and is a
 // separate, clearly-labeled suite.
+//
+// The battery exercises the signed-order path, so it runs with the capability
+// live gate opted in (FURLPAY_LIVE=1) — exactly as an operator would. The
+// gate's refusal behavior is proven separately in test/live-gate.test.js.
+process.env.FURLPAY_LIVE = "1";
 const test = require("node:test");
 const assert = require("node:assert");
 const { signRequest, hmacSha256Hex, credentialsFromEnv } = require("../dist/binance/binance.auth.js");

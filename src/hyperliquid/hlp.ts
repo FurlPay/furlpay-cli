@@ -13,6 +13,7 @@ import { HyperliquidClient } from "./client";
 import { HyperliquidSigner } from "./signer";
 import { HyperliquidNetwork, HyperliquidVaultDetails } from "./types";
 import { DecimalMath } from "../precision/decimal-math";
+import { assertLiveAllowed } from "../capabilities/registry";
 
 export class HlpVaultService {
   private client: HyperliquidClient;
@@ -138,6 +139,9 @@ export class HlpVaultService {
       usd: amountUsd,
     };
 
+    // Capability registry live gate (readiness P1) — signed value movement.
+    assertLiveAllowed("hyperliquid.hlp-deposit");
+
     const nonce = Date.now();
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);
     
@@ -193,6 +197,9 @@ export class HlpVaultService {
       isDeposit: false,
       usd: amountUsd,
     };
+
+    // Capability registry live gate (readiness P1) — signed value movement.
+    assertLiveAllowed("hyperliquid.hlp-withdraw");
 
     const nonce = Date.now();
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);

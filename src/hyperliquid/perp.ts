@@ -14,6 +14,7 @@
 import * as crypto from "crypto";
 import { PerpOrderParams, PerpExecutionResult, PerpPosition } from "../types";
 import { HyperliquidClient } from "./client";
+import { assertLiveAllowed } from "../capabilities/registry";
 import { HyperliquidSigner } from "./signer";
 import { HyperliquidRiskEngine } from "./risk-engine";
 import { HyperliquidNetwork, HyperliquidOpenOrder, HyperliquidUserFill } from "./types";
@@ -135,6 +136,10 @@ export class HyperliquidPerpService {
     // Non-blocking risk observations (e.g. peg feed unavailable) ride along —
     // the order proceeds, but the caller sees why the risk engine flagged it.
     const riskWarnings = riskCheck.warnings;
+
+    // Capability registry live gate (readiness P1): a signed order leaves the
+    // simulation perimeter. Explicit operator opt-in required, default off.
+    assertLiveAllowed("hyperliquid.perp-execution");
 
     // Format wire fields matching precision rules
     const wirePrice = this.client.formatPrice(targetPrice);
