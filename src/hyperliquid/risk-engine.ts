@@ -146,17 +146,18 @@ export class HyperliquidRiskEngine {
     // closure): the monitor used to sit at zero readings forever because
     // nothing in src/ ever called updatePrice(), so its neutral fallback
     // read as a permanent clean bill of health. Each evaluation now
-    // refreshes the USDC/USD reading (at most once per 30s — the monitor
-    // itself only trusts readings <60s old). A failed feed never yields a
-    // synthetic price: the monitor keeps its last state, a halt already in
-    // force stays in force, and a no-data evaluation attaches an explicit
-    // warning to the result instead of passing silently.
+    // refreshes USDC/USD from EVERY configured source (primary + secondary,
+    // readiness P14 — a single source cannot be cross-checked), at most once
+    // per 30s (the monitor itself only trusts readings <60s old). A failed
+    // feed never yields a synthetic price: the monitor keeps its last state,
+    // a halt already in force stays in force, and a no-data evaluation
+    // attaches an explicit warning to the result instead of passing silently.
     const nowMs = Date.now();
     if (nowMs - this.lastPegFetchMs >= 30_000) {
       this.lastPegFetchMs = nowMs;
-      const pegPrice = await this.pegFeed.fetchUsdcUsd();
-      if (pegPrice !== null) {
-        this.pegMonitor.updatePrice(this.pegFeed.describeSource(), pegPrice, nowMs);
+      const readings = await this.pegFeed.fetchReadings();
+      for (const r of readings) {
+        this.pegMonitor.updatePrice(r.source, r.priceUsd, nowMs);
       }
     }
     const pegEvaluation = this.pegMonitor.evaluatePeg(nowMs);

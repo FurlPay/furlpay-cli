@@ -117,6 +117,36 @@ describe("USDC Peg Guardrail (live ingestion, audit closure)", () => {
   it("P4b: the feed refuses non-https endpoints outright", () => {
     assert.throws(() => new UsdcPegFeed({ url: "http://stub.invalid/usdc-price" }), /INSECURE_URL/);
   });
+
+  it("P4c: two sources are ingested independently — divergence crosses the halt threshold (readiness P14)", async () => {
+    // Primary (CoinGecko shape) says 1.0000; secondary (Coinbase spot shape)
+    // says 0.9500. Consensus 0.9750 → 250 bps drift → DEPEG halt. A single
+    // tampered source cannot mask the other's reading.
+    const feed = new UsdcPegFeed({
+      url: STUB_URL,
+      fetchImpl: async (url) => {
+        if (String(url).includes("coinbase")) {
+          return { ok: true, json: async () => ({ data: { amount: "0.9500" } }) };
+        }
+        return { ok: true, json: async () => ({ "usd-coin": { usd: 1.0 } }) };
+      },
+    });
+    const readings = await feed.fetchReadings();
+    assert.strictEqual(readings.length, 2, "both sources answered and parsed");
+    const avg = readings.reduce((s, r) => s + r.priceUsd, 0) / readings.length;
+    assert.ok(Math.abs(avg - 0.975) < 1e-9);
+
+    const risk = new HyperliquidRiskEngine(
+      { maxSingleOrderUsd: 50_000 },
+      { pegFeed: feed }
+    );
+    const check = await risk.evaluatePreTrade({
+      coin: "BTC", side: "buy", size: 0.01, price: 75_005, leverage: 2,
+      client: stubClient(),
+    });
+    assert.strictEqual(check.passed, false);
+    assert.match(check.reason, /DEPEG_HALT/);
+  });
 });
 
 describe("Fail-closed risk engine regressions (same audit)", () => {
