@@ -31,6 +31,7 @@ furlpay trade terminal --pair JQQQ/USDC
 | [Installation](https://furlpay.github.io/furlpay-cli/guide/installation) | npm / curl / PowerShell / npx / offline tarballs, updates, uninstall |
 | [Authentication](https://furlpay.github.io/furlpay-cli/guide/authentication) | RFC 8628 device login, headless OTP, why keys are never argv |
 | [Configuration & Diagnostics](https://furlpay.github.io/furlpay-cli/guide/configuration) | `config validate`, `doctor`, `tx verify` semantics, faucet |
+| [Mainnet Readiness](MAINNET_TESTING_RUNBOOK.md) | The staged A/B/C/D protocol, the readiness gate, dry-run semantics, what controlled live execution requires |
 | [A2A Payments](https://furlpay.github.io/furlpay-cli/guide/payments) | The quote-bound, consent-first payment flow; outcome classification |
 | [Escrow (ETSS)](https://furlpay.github.io/furlpay-cli/guide/escrow) | Lifecycle, cryptographic proof verification, fail-closed modes |
 | [x402 Micropayments](https://furlpay.github.io/furlpay-cli/guide/x402) | Challenge settlement (labeled simulated), replay ledger, agent gating |
@@ -489,6 +490,35 @@ furlpay doctor [--output json]
 
 ---
 
+9. Mainnet Readiness Gate (furlpay mainnet)
+# Strictly read-only: 13 prerequisite checks, each PASS / FAIL / BLOCKED /
+# NOT_VERIFIED with evidence. Exit 0 only when every execution-blocking check
+# passes. Runtime, config, master gate, signer presence, mainnet /info
+# reachability, USDC peg sanity, oracle agreement, Horizon, Solana RPC, risk
+# limits, ledger writability, Binance credentials, MCP policy.
+furlpay mainnet readiness [--output json]
+
+# Per-surface snapshot: which network each family targets, read-only vs
+# mutating vs simulated.
+furlpay mainnet status
+
+# Evaluate a hypothetical order through the REAL pre-trade risk engine
+# against live mainnet metadata + L2 book. NEVER signs, NEVER submits,
+# NEVER records turnover — only /info is reachable from a dry run (pinned
+# by test). The second command must REFUSE (1 BTC @ 75k > $50k cap).
+furlpay mainnet dry-run BTC --side buy --size 0.001 --leverage 1
+furlpay mainnet dry-run BTC --side buy --size 1 --leverage 1
+
+> **Rule zero:** a general request to prepare the system is NOT authorization
+> to trade. Every real-money order requires its own explicit, transaction-
+> specific human confirmation. The staged protocol (offline → testnet →
+> mainnet read-only → controlled live) lives in
+> [MAINNET_TESTING_RUNBOOK.md](MAINNET_TESTING_RUNBOOK.md); the source-audited
+> gap log and subsystem matrix live in
+> [MAINNET_READINESS_AUDIT.md](MAINNET_READINESS_AUDIT.md).
+
+---
+
 ## Model Context Protocol (MCP) AI Agents
 
 The CLI provides a standardized STDIO MCP server for Claude, Cursor, Gemini, and autonomous AI trading agents:
@@ -677,6 +707,7 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | FOBXX sweep (`furlpay_sweep_treasury` target FOBXX) | **SIMULATED** | No Stellar Benji contract call in this build |
 | Oracle quotes (`furlpay oracle price/sources`, MCP `furlpay_oracle_price`) | **LIVE** (read-only) | Multi-source USD price fan-out over real public endpoints (Coinbase spot, Kraken ticker, Binance USDT-cross, Jupiter Solana); median of sources gated on per-asset cross-source agreement (±1–3%). DISAGREEMENT returns per-source readings with a **null price** — never a blended number across disagreeing sources; UNAVAILABLE guesses nothing. Sanity bands per asset (SOL clamped $1–$2000). Optional Pyth Hermes gateway provider is **inactive unless configured** — the public Hermes endpoint is auth-gated (Pyth Pro); no unverified feed IDs ship baked in. This surface never signs or broadcasts. |
 | Solana live surface (`furlpay solana status/balance/price/quote`, MCP `furlpay_solana_cluster_status`) | **LIVE** (read-only) | Real JSON-RPC reads against mainnet-beta (epoch/slot/block height, lamport balances; `SOLANA_RPC_URL` override) and indicative Jupiter price/quote routes. Addresses validated as base58 before any request; RPC protocol/HTTP errors **throw** — never a synthetic slot. Every output states that this build has no Solana signing path: quotes are labeled `INDICATIVE` routing information and cannot be filled by anything in this CLI. |
+| Mainnet readiness gate (`furlpay mainnet readiness/status/dry-run`) | **LIVE** (read-only gate) | 13 prerequisite checks with evidence and a hard verdict (exit 1 = not-ready). The dry run evaluates a hypothetical order through the REAL risk engine against live mainnet data and can never sign or submit — only `/info` is reachable from a dry run, pinned by test. Stage D real-money execution requires the operator's explicit transaction-specific confirmation per order (`MAINNET_TESTING_RUNBOOK.md`). |
 
 **Environment keys:** HLP/perp execution reads `HYPERLIQUID_PRIVATE_KEY` (or
 `ETH_PRIVATE_KEY`) from the environment — never from argv. Private keys and
