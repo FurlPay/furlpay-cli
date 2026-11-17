@@ -9,6 +9,7 @@ import {
 } from "./binance.client.js";
 import { credentialsFromEnv } from "./binance.auth.js";
 import { DecimalMath } from "../precision/decimal-math.js";
+import { assertLiveAllowed } from "../capabilities/registry.js";
 import type {
   BinanceEnv,
   BinanceMarket,
@@ -26,6 +27,10 @@ export interface BinanceAdapterOptions {
   readonly fetchImpl?: typeof fetch;
   /** Injected clock for tests. */
   readonly nowMs?: () => number;
+  /** Durable audit blotter (external audit M-02): order intents and
+   *  outcomes land in the hash-chained ledger when provided. Best-effort —
+   *  an audit-write failure never blocks the trade path. */
+  readonly blotter?: { appendEvent(t: any, payload: any): unknown };
 }
 
 export interface TradeIntent {
@@ -71,6 +76,16 @@ export class BinanceAdapter implements ExchangeAdapter {
   readonly capabilities: ExchangeCapabilities;
   private readonly client: BinanceClient;
   private readonly env: BinanceEnv;
+  private readonly blotter?: { appendEvent(t: any, payload: any): unknown };
+  private blotterWriteFailures = 0;
+  private note(type: string, payload: Record<string, unknown>): void {
+    if (!this.blotter) return;
+    try {
+      this.blotter.appendEvent(type, payload);
+    } catch {
+      this.blotterWriteFailures += 1; // visible on the instance, never silent
+    }
+  }
 
   constructor(opts: BinanceAdapterOptions = {}) {
     const env = opts.env ?? "testnet";
@@ -83,6 +98,7 @@ export class BinanceAdapter implements ExchangeAdapter {
       );
     }
     this.env = env;
+    this.blotter = opts.blotter;
     this.capabilities = binanceCapabilities(env);
     this.client = new BinanceClient({
       env,
@@ -134,19 +150,33 @@ export class BinanceAdapter implements ExchangeAdapter {
       throw new Error(`notionalUsd must be a positive finite number, got ${String(intent.notionalUsd)}`);
     }
     const gate = mandateCheck(intent);
+    this.note("AUTHORIZATION_GRANTED", {
+      symbol: intent.symbol, side: intent.side, notionalUsd: intent.notionalUsd,
+      authorized: gate.authorized, reason: gate.authorized ? undefined : gate.reason,
+      agentAddress: intent.agentAddress,
+    });
     if (!gate.authorized) {
       throw new Error(`POLICY_REFUSED: ${gate.reason ?? "mandate declined this order"}`);
     }
+    // Capability registry live gate (readiness P1): a refused or unopted
+    // build never signs an exchange order — the gate fires before any HTTP
+    // request is built.
+    assertLiveAllowed("binance.spot");
     // Market buy: spend quote (USDT) amount. Market sell: base quantity is
     // required by the exchange; we refuse to derive it silently from a float
     // price and require the caller to send a quantity-bearing intent instead.
     if (intent.side === "BUY") {
-      return this.client.placeSpotOrder({
+      const placed = await this.client.placeSpotOrder({
         symbol: intent.symbol.toUpperCase(),
         side: "BUY",
         type: "MARKET",
         quoteOrderQty: String(intent.notionalUsd),
       });
+      this.note("ORDER_SUBMITTED", {
+        venue: "BINANCE", env: this.env, symbol: intent.symbol, side: "BUY",
+        notionalUsd: intent.notionalUsd, orderId: placed.orderId, status: placed.status,
+      });
+      return placed;
     }
     throw new Error(
       "MARKET_SELL_QUANTITY_REQUIRED: selling requires an exact base quantity; " +
@@ -155,7 +185,9 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async cancelOrder(symbol: string, orderId: number): Promise<unknown> {
-    return this.client.cancelSpotOrder(symbol, orderId);
+    const res = await this.client.cancelSpotOrder(symbol, orderId);
+    this.note("ORDER_CANCELLED", { venue: "BINANCE", env: this.env, symbol, orderId });
+    return res;
   }
 
   /**
@@ -187,15 +219,24 @@ export class BinanceAdapter implements ExchangeAdapter {
       agentAddress: "cli",
     };
     const gate = mandateCheck(intent);
+    this.note("AUTHORIZATION_GRANTED", {
+      symbol: intent.symbol, side: "SELL", notionalUsd: intent.notionalUsd,
+      authorized: gate.authorized, reason: gate.authorized ? undefined : gate.reason,
+    });
     if (!gate.authorized) {
       throw new Error(`POLICY_REFUSED: ${gate.reason ?? "mandate declined this order"}`);
     }
-    return this.client.placeSpotOrder({
+    const placed = await this.client.placeSpotOrder({
       symbol: symbol.toUpperCase(),
       side: "SELL",
       type: "MARKET",
       quantity,
     });
+    this.note("ORDER_SUBMITTED", {
+      venue: "BINANCE", env: this.env, symbol: intent.symbol, side: "SELL",
+      quantity, notionalUsd: intent.notionalUsd, orderId: placed.orderId, status: placed.status,
+    });
+    return placed;
   }
 }
 

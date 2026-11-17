@@ -14,8 +14,10 @@
 import * as crypto from "crypto";
 import { PerpOrderParams, PerpExecutionResult, PerpPosition } from "../types";
 import { HyperliquidClient } from "./client";
+import { assertLiveAllowed } from "../capabilities/registry";
 import { HyperliquidSigner } from "./signer";
-import { HyperliquidRiskEngine } from "./risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "./risk-engine";
+import { DurableEventStore, defaultBlotterPath } from "../blotter/durable-event-store";
 import { HyperliquidNetwork, HyperliquidOpenOrder, HyperliquidUserFill } from "./types";
 import { DecimalMath } from "../precision/decimal-math";
 
@@ -30,11 +32,34 @@ export class HyperliquidPerpService {
   private signer: HyperliquidSigner | null = null;
   private riskEngine: HyperliquidRiskEngine;
   private network: HyperliquidNetwork;
+  /** Durable audit blotter (external audit 2026-11-17b M-02): order intents,
+   *  risk verdicts, cancellations and kill-switch events land in a
+   *  hash-chained ledger that survives the process. Best-effort: a failed
+   *  audit write never blocks the trade path, but is counted. */
+  private blotter?: DurableEventStore;
+  lastBlotterWriteFailed = 0;
+  private get audit(): DurableEventStore {
+    if (!this.blotter) {
+      try {
+        this.blotter = new DurableEventStore({ filePath: defaultBlotterPath() });
+      } catch {
+        this.blotter = new DurableEventStore();
+      }
+    }
+    return this.blotter;
+  }
+  private note(type: Parameters<DurableEventStore["appendEvent"]>[0], payload: Record<string, unknown>): void {
+    try {
+      this.audit.appendEvent(type, payload);
+    } catch {
+      this.lastBlotterWriteFailed += 1;
+    }
+  }
 
   constructor(config?: HyperliquidPerpConfig) {
     this.network = config?.network || (process.env.FURLPAY_HL_TESTNET === "1" ? "testnet" : "mainnet");
     this.client = new HyperliquidClient(this.network);
-    this.riskEngine = config?.riskEngine || new HyperliquidRiskEngine();
+    this.riskEngine = config?.riskEngine || new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
 
     const key = config?.privateKey || process.env.HYPERLIQUID_PRIVATE_KEY || process.env.ETH_PRIVATE_KEY;
     if (key) {
@@ -129,12 +154,24 @@ export class HyperliquidPerpService {
       userState,
     });
 
-    if (!riskCheck.passed) {
-      throw new Error(`Pre-Trade Risk Check Refused: ${riskCheck.reason}`);
-    }
     // Non-blocking risk observations (e.g. peg feed unavailable) ride along —
     // the order proceeds, but the caller sees why the risk engine flagged it.
     const riskWarnings = riskCheck.warnings;
+
+    // Blotter (M-02): risk verdicts are auditable whether they pass or refuse.
+    this.note("RISK_EVALUATION", {
+      coin: cleanCoin, side: params.side, size: params.size,
+      price: targetPrice, passed: riskCheck.passed,
+      reason: riskCheck.passed ? undefined : riskCheck.reason,
+      warnings: riskWarnings ?? undefined,
+    });
+    if (!riskCheck.passed) {
+      throw new Error(`Pre-Trade Risk Check Refused: ${riskCheck.reason}`);
+    }
+
+    // Capability registry live gate (readiness P1): a signed order leaves the
+    // simulation perimeter. Explicit operator opt-in required, default off.
+    assertLiveAllowed("hyperliquid.perp-execution");
 
     // Format wire fields matching precision rules
     const wirePrice = this.client.formatPrice(targetPrice);
@@ -192,6 +229,12 @@ export class HyperliquidPerpService {
       DecimalMath.divMinor(notionalMinor, DecimalMath.parseUnits(params.leverage, 6))
     ) / 1e6;
     const liquidationPriceEstimated = this.calculateLiquidationPrice(fillPrice, params.leverage, params.side);
+
+    // Blotter (M-02): the outcome as the exchange reported it.
+    this.note(status === "FILLED" ? "FILL_RECORDED" : "ORDER_RESTING", {
+      coin: cleanCoin, side: params.side, size: params.size,
+      orderId: exchangeOrderId, fillPrice, notionalUsd, cloid,
+    });
 
     return {
       status,
@@ -385,26 +428,37 @@ export class HyperliquidPerpService {
   }
 
   /**
-   * Emergency Kill Switch: Cancel all open orders and market-close all positions.
+   * Emergency Kill Switch: cancel open orders and market-close positions.
+   * With `symbol` given (external audit 2026-11-17b M-05) the blast radius
+   * is SCOPED to that market: only its resting orders are canceled and only
+   * its position is closed — a BTC anomaly must never liquidate an
+   * unrelated ETH book. Without a symbol it remains account-wide (full panic).
    */
-  async triggerKillSwitch(overrideSigner?: HyperliquidSigner): Promise<{
+  async triggerKillSwitch(overrideSigner?: HyperliquidSigner, symbol?: string): Promise<{
     canceledOrders: number;
     closedPositions: string[];
+    scopedTo?: string;
   }> {
     const activeSigner = overrideSigner || this.signer;
     if (!activeSigner) {
       throw new Error("No signer configured for emergency kill switch.");
     }
 
-    // 1. Cancel all resting orders
-    const cancelRes = await this.cancelAllOrders(undefined, activeSigner);
+    // Normalize the scope: "BTC", "BTC-PERP", "btc" all scope to BTC.
+    const coin = symbol ? symbol.toUpperCase().replace(/-PERP$/i, "") : undefined;
 
-    // 2. Market close all active positions
+    // 1. Cancel resting orders (scoped when a symbol is given)
+    const cancelRes = await this.cancelAllOrders(coin, activeSigner);
+
+    // 2. Market close active positions (scoped when a symbol is given)
     const userAddress = activeSigner.getAddress();
     const positions = await this.getPositions(userAddress);
+    const scoped = coin
+      ? positions.filter((p) => p.symbol.toUpperCase().replace(/-PERP$/i, "") === coin)
+      : positions;
     const closedPositions: string[] = [];
 
-    for (const pos of positions) {
+    for (const pos of scoped) {
       try {
         await this.closePosition(pos.symbol, activeSigner);
         closedPositions.push(pos.symbol);
@@ -413,9 +467,17 @@ export class HyperliquidPerpService {
       }
     }
 
+    // Blotter (M-02): a kill-switch firing is exactly what the audit trail
+    // exists to record — scoped or account-wide.
+    this.note("KILL_SWITCH_TRIGGERED", {
+      scopedTo: coin ?? "ALL", canceledOrders: cancelRes.canceledCount,
+      closedPositions,
+    });
+
     return {
       canceledOrders: cancelRes.canceledCount,
       closedPositions,
+      ...(coin ? { scopedTo: coin } : {}),
     };
   }
 }

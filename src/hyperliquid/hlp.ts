@@ -13,12 +13,25 @@ import { HyperliquidClient } from "./client";
 import { HyperliquidSigner } from "./signer";
 import { HyperliquidNetwork, HyperliquidVaultDetails } from "./types";
 import { DecimalMath } from "../precision/decimal-math";
+import { assertLiveAllowed } from "../capabilities/registry";
+import { ledgerDir, withLedgerLock, readLedger, writeLedger } from "../services/persistentLedger";
+import { join } from "path";
+
+interface HlpLockupStore {
+  schema: "furlpay-hlp-lockup-v1";
+  /** signer address (lowercase) → last successful deposit timestamp (ms). */
+  lastDepositMs: Record<string, number>;
+}
 
 export class HlpVaultService {
   private client: HyperliquidClient;
   private signer: HyperliquidSigner | null = null;
   private vaultAddress = "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303"; // Canonical HLP Vault Address
   private readonly LOCKUP_PERIOD_MS = 4 * 24 * 60 * 60 * 1000; // 4-day protocol lockup
+  /** Lockup ledger path (external audit 2026-11-17b H-04): the 4-day rule
+   *  is enforced from PERSISTED deposit timestamps — in-memory state dies
+   *  with the process and never protected a cross-invocation withdrawal. */
+  private readonly lockupLedgerPath = join(ledgerDir(), "hlp-lockup.json");
 
   constructor(network: HyperliquidNetwork = "mainnet", signer?: HyperliquidSigner) {
     this.client = new HyperliquidClient(network);
@@ -34,6 +47,46 @@ export class HlpVaultService {
 
   setSigner(signer: HyperliquidSigner): void {
     this.signer = signer;
+  }
+
+  /** Record a successful deposit's timestamp for the lockup clock (H-04). */
+  private recordDepositForLockup(signerAddress: string, atMs = Date.now()): void {
+    withLedgerLock(this.lockupLedgerPath, () => {
+      const store = readLedger<HlpLockupStore>(this.lockupLedgerPath) ?? {
+        schema: "furlpay-hlp-lockup-v1",
+        lastDepositMs: {},
+      };
+      store.lastDepositMs[signerAddress.toLowerCase()] = atMs;
+      writeLedger(this.lockupLedgerPath, store);
+    });
+  }
+
+  /**
+   * Client-side 4-day lockup enforcement (external audit 2026-11-17b H-04):
+   * refuse to even SIGN a premature withdrawal. The exchange enforces its
+   * own lockup; this is the client's own guardrail — fail closed when the
+   * ledger is unreadable rather than guessing.
+   */
+  private assertWithdrawalUnlocked(signerAddress: string): void {
+    const store = withLedgerLock(this.lockupLedgerPath, () =>
+      readLedger<HlpLockupStore>(this.lockupLedgerPath)
+    );
+    if (!store) {
+      // No deposit on record through this client: nothing to enforce.
+      return;
+    }
+    const last = store.lastDepositMs[signerAddress.toLowerCase()];
+    if (last === undefined) return;
+    const unlockAt = last + this.LOCKUP_PERIOD_MS;
+    if (Date.now() < unlockAt) {
+      const remainingMs = unlockAt - Date.now();
+      const hours = Math.ceil(remainingMs / 3_600_000);
+      throw new Error(
+        `HLP_LOCKUP_ACTIVE: last deposit was ${new Date(last).toISOString()}; the 4-day withdrawal ` +
+          `lockup lifts at ${new Date(unlockAt).toISOString()} (~${hours}h remaining). ` +
+          `Refusing to sign a premature vaultTransfer.`
+      );
+    }
   }
 
   getVaultAddress(): string {
@@ -138,6 +191,9 @@ export class HlpVaultService {
       usd: amountUsd,
     };
 
+    // Capability registry live gate (readiness P1) — signed value movement.
+    assertLiveAllowed("hyperliquid.hlp-deposit");
+
     const nonce = Date.now();
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);
     
@@ -158,6 +214,10 @@ export class HlpVaultService {
     }
 
     const lockupExpiry = new Date(Date.now() + this.LOCKUP_PERIOD_MS).toISOString();
+
+    // Durable lockup clock starts HERE (external audit H-04): the confirmed
+    // deposit is what the 4-day withdrawal guard will enforce against.
+    this.recordDepositForLockup(activeSigner.getAddress());
 
     return {
       status: "CONFIRMED",
@@ -187,12 +247,18 @@ export class HlpVaultService {
       throw new Error("No signer configured for HLP vault withdrawal.");
     }
 
+    // Client-side lockup gate BEFORE signing (external audit H-04).
+    this.assertWithdrawalUnlocked(activeSigner.getAddress());
+
     const action = {
       type: "vaultTransfer",
       vaultAddress: this.vaultAddress,
       isDeposit: false,
       usd: amountUsd,
     };
+
+    // Capability registry live gate (readiness P1) — signed value movement.
+    assertLiveAllowed("hyperliquid.hlp-withdraw");
 
     const nonce = Date.now();
     const signature = await activeSigner.signL1Action(action, nonce, this.vaultAddress);

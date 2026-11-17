@@ -78,11 +78,32 @@ export class KeystoreService {
     }
   }
 
+  /**
+   * Atomic keystore persistence (external audit 2026-11-17b M-03): write a
+   * unique temp file, fsync it, then rename over the target. A crash or a
+   * concurrent command can never leave the ENCRYPTED MASTER KEYSTORE
+   * truncated — the old file survives until the new one is complete.
+   */
   private saveEntries(entries: Record<string, StoredKeyEntry>): void {
-    fs.writeFileSync(this.keystorePath, JSON.stringify(entries, null, 2), {
-      encoding: "utf-8",
-      mode: 0o600,
-    });
+    const crypto = require("crypto") as typeof import("crypto");
+    const tmp = `${this.keystorePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(tmp, "wx", 0o600);
+      fs.writeFileSync(fd, JSON.stringify(entries, null, 2), { encoding: "utf8" });
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tmp, this.keystorePath);
+    } catch (err) {
+      throw new Error(`Keystore write failed (${this.keystorePath}): ${(err as Error)?.message || err}. ` +
+        `The previous keystore is intact — nothing was lost.`);
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch { /* already closed */ }
+      }
+      try { fs.unlinkSync(tmp); } catch { /* renamed, or never created */ }
+    }
   }
 
   importSecretKey(name: string, secretKey: string, password: string): StoredKeyEntry {

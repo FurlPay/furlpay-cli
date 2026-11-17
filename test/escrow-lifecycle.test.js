@@ -217,3 +217,27 @@ test("sanitizeTerminal: strips escape sequences, control chars, and line spoofin
   assert.strictEqual(sanitizeTerminal(null), "");
   assert.strictEqual(sanitizeTerminal("plain"), "plain");
 });
+
+// ── External audit 2026-11-17b C-01 ─────────────────────────────────────
+test("audit C-01: an EXPIRED escrow still deserializes — the refund path is never bricked", () => {
+  // An escrow created with a short expiry that has since lapsed. Its whole
+  // purpose post-expiry is refund: it MUST load from disk.
+  const terms = makeTerms({ expiryTimestamp: Math.floor(Date.now() / 1000) - 3600 });
+  // Creation with a past expiry stays refused (that is correct behavior).
+  assert.throws(() => new EscrowStateMachine(terms), /Expiry timestamp must be in the future/);
+
+  // But a snapshot of an escrow that expired AFTER creation must rehydrate:
+  // simulate by snapshotting a live machine, then rewinding its expiry.
+  const live = new EscrowStateMachine(makeTerms());
+  live.fund(makeTerms().buyer, "0xfund_tx_c01");
+  const snapshot = live.serialize();
+  const expiredSnapshot = {
+    ...snapshot,
+    terms: { ...snapshot.terms, expiryTimestamp: Math.floor(Date.now() / 1000) - 60 },
+  };
+  const restored = EscrowStateMachine.deserialize(expiredSnapshot);
+  assert.strictEqual(restored.getState(), "FUNDED");
+  // And the refund transition itself is reachable on the restored machine.
+  restored.triggerRefund(restored.getTerms ? restored.getTerms().arbiter : expiredSnapshot.terms.arbiter);
+  assert.strictEqual(restored.getState(), "REFUND_PENDING");
+});

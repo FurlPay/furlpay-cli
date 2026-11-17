@@ -23,11 +23,26 @@ import { LiquidationEngine } from "./liquidation-engine";
 import { UsdcPegMonitor } from "./usdc-peg-monitor";
 import { UsdcPegFeed } from "./peg-feed";
 import { DecimalMath } from "../precision/decimal-math";
+import { ledgerDir, withLedgerLock, readLedger, writeLedger } from "../services/persistentLedger";
+import { join } from "path";
+
+/** Production turnover ledger path — CLI/MCP/TUI/perp pass this explicitly. */
+export function defaultTurnoverLedgerPath(): string {
+  return join(ledgerDir(), "risk-turnover.json");
+}
+
+interface TurnoverStore {
+  schema: "furlpay-risk-turnover-v1";
+  /** UTC calendar day the counter belongs to ("YYYY-MM-DD"). */
+  day: string;
+  /** Consumed turnover in minor units (decimal string — BigInt-safe). */
+  consumedMinor: string;
+}
 
 export class HyperliquidRiskEngine {
   private limits: TradingRiskLimits;
   private dailyTurnoverConsumedMinor: bigint = 0n;
-  private lastResetDay: number = new Date().getUTCDate();
+  private lastResetDay: string = new Date().toISOString().slice(0, 10);
   private unifiedEngine: FurlPayInstitutionalRiskEngine;
   private marginEngine: MarginEngine;
   private liquidationEngine: LiquidationEngine;
@@ -35,8 +50,15 @@ export class HyperliquidRiskEngine {
   private pegFeed: UsdcPegFeed;
   /** Rate-limits feed refreshes; the monitor only trusts readings <60s old anyway. */
   private lastPegFetchMs: number = 0;
+  /**
+   * Durable turnover ledger (external audit 2026-11-17b M-01). Undefined =
+   * ephemeral in-memory counter (tests stay hermetic); a path = the cap
+   * survives process restarts. Production call sites pass
+   * defaultTurnoverLedgerPath().
+   */
+  private readonly turnoverLedgerPath?: string;
 
-  constructor(customLimits?: Partial<TradingRiskLimits>, deps?: { pegFeed?: UsdcPegFeed }) {
+  constructor(customLimits?: Partial<TradingRiskLimits>, deps?: { pegFeed?: UsdcPegFeed; turnoverLedgerPath?: string }) {
     this.limits = {
       maxSingleOrderUsd: 50_000,
       maxPositionNotionalUsd: 100_000,
@@ -46,6 +68,7 @@ export class HyperliquidRiskEngine {
       minOrderNotionalUsd: 10.0,
       ...customLimits,
     };
+    this.turnoverLedgerPath = deps?.turnoverLedgerPath;
     this.unifiedEngine = new FurlPayInstitutionalRiskEngine(this.limits);
     this.marginEngine = new MarginEngine();
     this.liquidationEngine = new LiquidationEngine(this.marginEngine);
@@ -75,13 +98,23 @@ export class HyperliquidRiskEngine {
   }
 
   /**
-   * Reset daily velocity counter at UTC midnight rollover.
+   * Reset daily velocity counter at UTC midnight rollover — and, when a
+   * durable ledger is configured, refresh from it so consumption recorded
+   * by OTHER processes this UTC day counts against this one (M-01).
    */
   private checkDailyReset(): void {
-    const currentDay = new Date().getUTCDate();
-    if (currentDay !== this.lastResetDay) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.lastResetDay) {
       this.dailyTurnoverConsumedMinor = 0n;
-      this.lastResetDay = currentDay;
+      this.lastResetDay = today;
+    }
+    if (this.turnoverLedgerPath) {
+      const store = withLedgerLock(this.turnoverLedgerPath, () =>
+        readLedger<TurnoverStore>(this.turnoverLedgerPath!)
+      );
+      if (store && store.day === today) {
+        this.dailyTurnoverConsumedMinor = BigInt(store.consumedMinor);
+      }
     }
   }
 
@@ -146,17 +179,18 @@ export class HyperliquidRiskEngine {
     // closure): the monitor used to sit at zero readings forever because
     // nothing in src/ ever called updatePrice(), so its neutral fallback
     // read as a permanent clean bill of health. Each evaluation now
-    // refreshes the USDC/USD reading (at most once per 30s — the monitor
-    // itself only trusts readings <60s old). A failed feed never yields a
-    // synthetic price: the monitor keeps its last state, a halt already in
-    // force stays in force, and a no-data evaluation attaches an explicit
-    // warning to the result instead of passing silently.
+    // refreshes USDC/USD from EVERY configured source (primary + secondary,
+    // readiness P14 — a single source cannot be cross-checked), at most once
+    // per 30s (the monitor itself only trusts readings <60s old). A failed
+    // feed never yields a synthetic price: the monitor keeps its last state,
+    // a halt already in force stays in force, and a no-data evaluation
+    // attaches an explicit warning to the result instead of passing silently.
     const nowMs = Date.now();
     if (nowMs - this.lastPegFetchMs >= 30_000) {
       this.lastPegFetchMs = nowMs;
-      const pegPrice = await this.pegFeed.fetchUsdcUsd();
-      if (pegPrice !== null) {
-        this.pegMonitor.updatePrice(this.pegFeed.describeSource(), pegPrice, nowMs);
+      const readings = await this.pegFeed.fetchReadings();
+      for (const r of readings) {
+        this.pegMonitor.updatePrice(r.source, r.priceUsd, nowMs);
       }
     }
     const pegEvaluation = this.pegMonitor.evaluatePeg(nowMs);
@@ -225,8 +259,38 @@ export class HyperliquidRiskEngine {
       }
     }
 
-    // Record turnover
-    this.dailyTurnoverConsumedMinor += notionalMinor;
+    // Record turnover. With a durable ledger this is an ATOMIC
+    // re-check-and-consume under the file lock: if a concurrent process
+    // consumed the remaining headroom between the pre-check and now, this
+    // order REFUSES rather than breaching the cap (M-01).
+    if (this.turnoverLedgerPath) {
+      const dailyCapMinor = DecimalMath.parseUnits(this.limits.dailyTurnoverCapUsd, 6);
+      const today = new Date().toISOString().slice(0, 10);
+      const verdict = withLedgerLock(this.turnoverLedgerPath, () => {
+        const store = readLedger<TurnoverStore>(this.turnoverLedgerPath!);
+        const consumed = store && store.day === today ? BigInt(store.consumedMinor) : 0n;
+        if (consumed + notionalMinor > dailyCapMinor) {
+          return { ok: false as const, consumed };
+        }
+        writeLedger(this.turnoverLedgerPath!, {
+          schema: "furlpay-risk-turnover-v1",
+          day: today,
+          consumedMinor: (consumed + notionalMinor).toString(),
+        });
+        return { ok: true as const, consumed: consumed + notionalMinor };
+      });
+      this.dailyTurnoverConsumedMinor = verdict.consumed;
+      this.lastResetDay = today;
+      if (!verdict.ok) {
+        return {
+          passed: false,
+          reason: `Order would breach daily turnover cap $${this.limits.dailyTurnoverCapUsd} USD ` +
+            `(Consumed across processes: $${(Number(verdict.consumed) / 1e6).toFixed(2)}). Fail-closed at the atomic record.`,
+        };
+      }
+    } else {
+      this.dailyTurnoverConsumedMinor += notionalMinor;
+    }
 
     return pegWarnings ? { passed: true, warnings: pegWarnings } : { passed: true };
   }

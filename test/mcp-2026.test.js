@@ -49,10 +49,12 @@ test("MCP 2026 Specification: Read-only tools do not mandate human interaction",
 });
 
 test("MCP 2026 Specification: TypeScript McpStdioServer enforces requiresUserInteraction", () => {
+  // P7: the DEFAULT server is read-only — sensitive tools are structurally
+  // ABSENT, not merely annotated. They exist only in an explicit
+  // execution-mode server, where they keep the interaction mandate.
   const server = new McpStdioServer("test-agent");
-  const toolDefs = server.getToolDefinitions();
-
-  assert(toolDefs.length >= 18, `Server must expose at least 18 tools, got ${toolDefs.length}`);
+  const defaultNames = server.getToolDefinitions().map((t) => t.name);
+  assert(defaultNames.length >= 18, `Server must expose at least 18 tools, got ${defaultNames.length}`);
 
   const sensitiveTools = [
     "furlpay_trade",
@@ -62,14 +64,49 @@ test("MCP 2026 Specification: TypeScript McpStdioServer enforces requiresUserInt
     "furlpay_emergency_stop",
     "furlpay_pay",
   ];
-
   for (const name of sensitiveTools) {
-    const def = toolDefs.find((t) => t.name === name);
-    assert(def, `Tool ${name} must be registered in McpStdioServer`);
+    assert(!defaultNames.includes(name), `Tool ${name} must be ABSENT from the default read-only server (P7)`);
+  }
+
+  // Execution mode: the tools exist and still mandate human interaction.
+  const execServer = new McpStdioServer("test-agent", { mode: "execution" });
+  const execDefs = execServer.getToolDefinitions();
+  for (const name of sensitiveTools) {
+    const def = execDefs.find((t) => t.name === name);
+    assert(def, `Tool ${name} must be registered in an execution-mode McpStdioServer`);
     assert.strictEqual(
       def._meta?.["anthropic/requiresUserInteraction"],
       true,
       `TypeScript MCP Tool ${name} MUST declare anthropic/requiresUserInteraction: true`
+    );
+  }
+});
+
+test("P23: MCP finance surface is inspection-only — no approve/create/limit/settle tool exists", () => {
+  const server = new McpStdioServer("test-agent");
+  const toolDefs = server.getToolDefinitions();
+  // P23 scope: the FINANCE money-authorization surface (approval engine,
+    // orchestrator, spend controls) is CLI-human-only. The x402 challenge
+    // tool (furlpay_settle_invoice) is a separate execution surface gated by
+    // agent policy — its further restriction is P7's job, not this guard's.
+    const FORBIDDEN = ["approve", "approval", "create_payment", "set_limit", "confirm", "cancel_payment"];
+  for (const def of toolDefs) {
+    const n = def.name.toLowerCase();
+    for (const bad of FORBIDDEN) {
+      assert(
+        !n.includes(bad),
+        `MCP tool ${def.name} must NOT exist — money-authorization verbs belong to the human CLI, never the agent surface (P23)`
+      );
+    }
+  }
+  // The finance tools that DO exist are read-only by annotation and honest about it.
+  const financeTools = toolDefs.filter((t) => t.name.startsWith("furlpay_finance"));
+  assert(financeTools.length >= 5, `finance inspection tools should exist (got ${financeTools.length})`);
+  for (const t of financeTools) {
+    assert.strictEqual(
+      t.annotations?.readOnlyHint ?? true,
+      true,
+      `Finance tool ${t.name} must be readOnlyHint (or omit destructive hints)`
     );
   }
 });

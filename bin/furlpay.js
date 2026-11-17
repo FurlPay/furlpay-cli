@@ -233,6 +233,10 @@ async function main() {
     case "escrow":
     case "account":
     case "binance":
+    case "finance":
+    // ---- oracle quotes + live read-only Solana surface (2026-11-17 gaps 2/5)
+    case "oracle":
+    case "solana":
       return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
 
     // ---- market microstructure analytics (offline, supplied book) ----------

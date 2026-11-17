@@ -25,6 +25,8 @@ Every execution surface in this CLI is **labeled at runtime**. This table is the
 | Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions broadcast. `rwa kyc` reports `NOT_IMPLEMENTED` (exit 1); regulated-asset trade results carry `sep8Status: "not_performed"` — compliance never claimed. Registry carries no hardcoded APY and no invented approval-server URLs |
 | MCP `furlpay_balance` (unauthenticated mode) | **SIMULATED** | Sample fixture balances, flagged `simulated: true` |
 | FOBXX sweep (`furlpay_sweep_treasury` target FOBXX) | **SIMULATED** | No Stellar Benji contract call in this build; APY is `null` with an explanatory note |
+| Oracle quotes (`furlpay oracle`, MCP `furlpay_oracle_price`) | **LIVE** (read-only) | Multi-source USD fan-out (Coinbase, Kraken, Binance USDT-cross, Jupiter) with per-asset sanity bands and a cross-source agreement gate. DISAGREEMENT → per-source readings + **null price** (never blended); UNAVAILABLE → nothing guessed. Pyth Hermes provider inactive unless a gateway + feed ids are configured. |
+| Solana live surface (`furlpay solana status/balance/price/quote`) | **LIVE** (read-only) | Real RPC reads + indicative Jupiter routes. Addresses base58-validated pre-request; RPC errors throw (no synthetic slots). No Solana signing path exists in this build — quotes are `INDICATIVE` only. |
 
 ## Environment-key honesty
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.FurlPay/furlpay-cli",
-  "description": "Stablecoin payments, swaps, stock orders, market data, travel booking, yield and card controls.",
+  "description": "Read-only MCP server by default: market data, quotes, balances, analytics and finance inspection. Value-moving tools stay unregistered unless the operator starts the server with --enable-execution and a configured agent policy (spend caps enforced; two-phase preview then confirm).",
   "repository": {
     "url": "https://github.com/FurlPay/furlpay-cli",
     "source": "github"

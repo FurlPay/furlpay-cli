@@ -21,11 +21,52 @@ import { HlpVaultService } from "../hyperliquid/hlp";
 import { HyperliquidPerpService } from "../hyperliquid/perp";
 import { MarketDiscoveryService } from "../market/discovery";
 import { MarketDataService } from "../services/market-data";
-import { HyperliquidRiskEngine } from "../hyperliquid/risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "../hyperliquid/risk-engine";
 import { HyperliquidClient } from "../hyperliquid/client";
+import { FinanceManager } from "../finance/manager";
+import { sanitizeUntrusted, sanitizeNumeric, canonicalArgsHash } from "./sanitize";
+import { OraclePriceAggregator } from "../oracles/aggregator";
+import { SolanaRpcClient } from "../solana/rpc";
+
+/** MCP surface modes (readiness P7): a default install cannot move funds. */
+export type McpMode = "read-only" | "execution";
+
+/**
+ * Tools that sign, broadcast or move value. In read-only mode (the DEFAULT)
+ * these are structurally absent from the tool list AND refused at the
+ * dispatcher — an MCP client that never opted into execution can inspect,
+ * quote and analyze, but never transact.
+ */
+const EXECUTION_TOOLS = new Set([
+  "furlpay_settle_invoice",
+  "furlpay_sweep_treasury",
+  "furlpay_trade",
+  "furlpay_trade_perp",
+  "furlpay_execute_trade",
+  "furlpay_cancel_order",
+  "furlpay_emergency_stop",
+  "furlpay_pay",
+]);
+
+const TWO_PHASE_TTL_MS = 10 * 60_000;
+const DEFAULT_MUTATING_RATE_PER_MIN = 30;
+
+export interface McpServerOptions {
+  /** Default "read-only" — execution requires --enable-execution + policy. */
+  mode?: McpMode;
+  /** Injectable audit JSONL path (tests use temp dirs). */
+  auditPath?: string;
+  /** Mutating calls allowed per minute (default 30). */
+  ratePerMinute?: number;
+  /** Injectable agent-key service (tests use temp policy dirs). */
+  agentKeyService?: AgentKeyService;
+}
 
 export class McpStdioServer {
   private agentName: string;
+  private readonly mode: McpMode;
+  private readonly auditPath?: string;
+  private readonly ratePerMinute: number;
   private agentKeyService: AgentKeyService;
   private x402Engine: X402Engine;
   private router: SmartOrderRouter;
@@ -36,10 +77,37 @@ export class McpStdioServer {
   private marketData: MarketDataService;
   private riskEngine: HyperliquidRiskEngine;
   private hlClient: HyperliquidClient;
+  /** Lazy: `furlpay mcp` startup must not depend on finance-store health. */
+  private financeInstance?: FinanceManager;
+  /** Two-phase execution: previewed (tool, args) bound by hash. */
+  private previewStore = new Map<string, { tool: string; args: Record<string, unknown>; createdAt: number }>();
+  /** Per-call audit counters — write failures stay visible. */
+  private auditWriteFailures = 0;
+  private rateWindow = { start: 0, count: 0 };
 
-  constructor(agentName: string = "default-agent") {
+  /** Read-only finance surface. Deliberately no create/approve/limit tools —
+   *  MCP can inspect money, never authorize its movement (that is the
+   *  CLI human's job via `furlpay finance approval approve`). */
+  private getFinance(): FinanceManager {
+    if (!this.financeInstance) this.financeInstance = new FinanceManager();
+    return this.financeInstance;
+  }
+
+  /** True when an agent policy exists for this server's identity. */
+  hasAgentPolicy(): boolean {
+    return this.agentKeyService.loadAgentPolicy(this.agentName) !== null;
+  }
+
+  getMode(): McpMode {
+    return this.mode;
+  }
+
+  constructor(agentName: string = "default-agent", options: McpServerOptions = {}) {
     this.agentName = agentName;
-    this.agentKeyService = new AgentKeyService();
+    this.mode = options.mode ?? "read-only";
+    this.auditPath = options.auditPath;
+    this.ratePerMinute = options.ratePerMinute ?? DEFAULT_MUTATING_RATE_PER_MIN;
+    this.agentKeyService = options.agentKeyService ?? new AgentKeyService();
     this.x402Engine = new X402Engine();
     this.router = new SmartOrderRouter();
     this.sdexService = new SdexTradingService();
@@ -47,12 +115,12 @@ export class McpStdioServer {
     this.perpService = new HyperliquidPerpService();
     this.discovery = new MarketDiscoveryService();
     this.marketData = new MarketDataService();
-    this.riskEngine = new HyperliquidRiskEngine();
+    this.riskEngine = new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
     this.hlClient = new HyperliquidClient();
   }
 
   getToolDefinitions() {
-    return [
+    const all = [
       // 1. Core Payments & Micropayments
       {
         name: "furlpay_settle_invoice",
@@ -351,7 +419,118 @@ export class McpStdioServer {
           required: ["asset", "amount"],
         },
       },
+
+      // 9. Financial Operations Layer (READ-ONLY — inspection, never authorization)
+      {
+        name: "furlpay_finance_overview",
+        description: "Read-only overview of the local financial operations layer: accounts, spend limits, settlement capabilities. MCP cannot move money or approve payments.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "furlpay_finance_ledger",
+        description: "Read-only ledger view: recent double-entry transactions, or a full reconciliation report (balanced count, chain integrity).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            reconcile: { type: "boolean", description: "Run reconciliation instead of listing" },
+            limit: { type: "number", description: "Max transactions to list (default 10)" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_spend",
+        description: "Read-only spend report: window usage against limits, breakdown by unit, recent consuming transactions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            unit: { type: "string", description: "Filter to one unit, e.g. USDC" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_treasury",
+        description: "Read-only treasury balances (available vs reserved) and inflow/outflow by unit, derived from the ledger.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "furlpay_finance_billing",
+        description: "Read-only billing summary: payment volume in/out, fees by unit, state counts. Fees are reported separately from volume.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sinceIso: { type: "string", description: "Optional ISO timestamp window start" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_payments",
+        description: "Read-only payment history from the ledger. States are the ledger's own (submission is never settlement).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "Max payments (default 10)" },
+            inspect: { type: "string", description: "Inspect one payment by ledger tx id" },
+          },
+        },
+      },
+
+      // 11. Oracle & Solana live reads (gap report 2026-11-17 Gaps 2/5 —
+      // read-only, no signing path exists in either).
+      {
+        name: "furlpay_oracle_price",
+        description: "Live multi-source USD price quote (Coinbase/Kraken/Binance/Jupiter fan-out, median + cross-source agreement gate). DISAGREEMENT returns per-source readings with a null price — never a blended number across disagreeing sources.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            asset: { type: "string", description: "Asset symbol: SOL, BTC, ETH, XLM or USDC" },
+          },
+          required: ["asset"],
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false },
+      },
+      {
+        name: "furlpay_solana_cluster_status",
+        description: "Live read-only Solana cluster status from real RPC (epoch, slot, block height). No signing or broadcasting exists on this surface.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+      },
+
+      // 10. Two-phase execution protocol (readiness P7). Preview is always
+      // available and executes NOTHING; confirm exists only in execution
+      // mode and requires a configured agent policy per call.
+      {
+        name: "furlpay_preview_execution",
+        description: "Preview a value-moving tool call WITHOUT executing: binds sanitized arguments to a one-time executionHash and returns the net effect. Confirm via furlpay_confirm_execution.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tool: { type: "string", description: "The execution tool to preview, e.g. furlpay_trade" },
+            args: { type: "object", description: "The arguments that would be passed to that tool" },
+          },
+          required: ["tool", "args"],
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false },
+      },
+      {
+        name: "furlpay_confirm_execution",
+        description: "Execute a PREVIEWED tool call by its executionHash (single-use, 10-minute TTL). Re-runs the agent policy gate on the stored amount. Requires --enable-execution and a configured policy.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            executionHash: { type: "string", description: "The hash returned by furlpay_preview_execution" },
+          },
+          required: ["executionHash"],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+      },
     ];
+
+    // Read-only default (P7): execution tools are structurally ABSENT —
+    // tools/list never shows what this server must never do, and the
+    // dispatcher refuses them as a backstop.
+    const filtered = all.filter((t: any) => this.mode === "execution" || !EXECUTION_TOOLS.has(t.name));
+    // confirm is meaningless without execution mode.
+    return filtered.filter((t: any) => t.name !== "furlpay_confirm_execution" || this.mode === "execution");
   }
 
   /**
@@ -402,7 +581,178 @@ export class McpStdioServer {
     }
   }
 
-  async handleCall(name: string, args: any): Promise<any> {
+  /**
+   * Per-call audit trail (readiness P7): every call — allowed or refused —
+   * lands as one JSONL line with the agent identity and a hash of the
+   * arguments (never the raw arguments: a memo may contain untrusted text
+   * and the audit log must stay a safe surface).
+   */
+  private audit(tool: string, argsHash: string, allowed: boolean, reason?: string): void {
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      agent: this.agentName,
+      mode: this.mode,
+      tool,
+      argsHash,
+      allowed,
+      ...(reason ? { reason: reason.slice(0, 200) } : {}),
+    });
+    try {
+      const target = this.auditPath ?? require("os").homedir() + "/.furlpay/mcp-audit.jsonl";
+      require("fs").appendFileSync(target, line + "\n", { encoding: "utf8" });
+    } catch {
+      this.auditWriteFailures += 1; // visible, never silent-forever
+    }
+  }
+
+  /** Mutating calls per rolling minute — a runaway agent cannot hammer. */
+  private checkMutatingRate(): void {
+    const now = Date.now();
+    if (now - this.rateWindow.start >= 60_000) {
+      this.rateWindow = { start: now, count: 0 };
+    }
+    this.rateWindow.count += 1;
+    if (this.rateWindow.count > this.ratePerMinute) {
+      throw new Error(`MUTATING_RATE_LIMITED: more than ${this.ratePerMinute} mutating calls in a rolling minute — refusing.`);
+    }
+  }
+
+  /** Mode backstop helper: refusal message for a mutating direct call. */
+  private executionRefusal(name: string): Error {
+    return new Error(
+      `EXECUTION_MODE_REQUIRED: "${name}" moves value and this server runs READ-ONLY (default). ` +
+        `Start with \`furlpay mcp --wallet ${this.agentName} --enable-execution\` (a configured agent policy is required) or use the CLI as a human.`
+    );
+  }
+
+  /** Net effect summary for a previewed execution (P7 two-phase). */
+  private netEffect(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = { tool };
+    const pick = (k: string) => (typeof args[k] === "string" ? sanitizeUntrusted(args[k], 60) : args[k]);
+    if (tool === "furlpay_settle_invoice") {
+      try {
+        const ch = this.x402Engine.parseChallenge(String(args.challengeHeader ?? ""));
+        out.amount = sanitizeUntrusted(ch.amount, 40);
+      } catch { out.amount = "unparsable challenge (will refuse at confirm)"; }
+      out.maxCost = pick("maxCost");
+    } else if (tool === "furlpay_sweep_treasury") {
+      out.amountUsd = pick("amountUsd");
+      out.target = pick("target");
+    } else if (tool === "furlpay_trade" || tool === "furlpay_trade_perp" || tool === "furlpay_execute_trade") {
+      out.side = pick("side");
+      out.asset = pick("asset") ?? pick("symbol");
+      out.amount = pick("amount") ?? pick("size") ?? pick("quantity");
+    } else if (tool === "furlpay_pay") {
+      out.amount = pick("amount");
+      out.recipient = pick("recipient") ?? pick("to");
+    } else if (tool === "furlpay_cancel_order" || tool === "furlpay_emergency_stop") {
+      out.effect = "risk-reducing: cancels resting orders (no new exposure)";
+    }
+    return out;
+  }
+
+  /** Length-cap and strip control characters in every string arg. */
+  private sanitizeArgs(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+      if (typeof v === "string") out[k] = sanitizeUntrusted(v, k === "challengeHeader" ? 4096 : 200);
+      else out[k] = v;
+    }
+    return out;
+  }
+
+  /** The USD amount a stored preview would move — for the confirm-time gate. */
+  private policyAmountFor(tool: string, args: Record<string, unknown>): number {
+    for (const k of ["amountUsd", "maxCost", "amount", "size", "notional"]) {
+      const v = args[k];
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+      if (typeof v === "string") {
+        const n = sanitizeNumeric(v, 1e9);
+        if (n !== null) return n;
+      }
+    }
+    return 0; // risk-reducing tools (cancel/stop) carry no new spend
+  }
+
+  /**
+   * TWO-PHASE EXECUTION (readiness P7): mutating tools are never called
+   * directly. Preview binds sanitized arguments to a one-time hash and
+   * shows the net effect; confirm(hash) is the only path that executes, and
+   * it re-runs the policy gate on the STORED amount — confirm cannot
+   * smuggle different arguments past the cap checks.
+   */
+  async handleCall(name: string, args: any, viaConfirm = false): Promise<any> {
+    const argsHash = canonicalArgsHash(typeof args === "object" && args ? args : {});
+
+    if (name === "furlpay_preview_execution") {
+      const tool = sanitizeUntrusted(args?.tool, 60);
+      if (!EXECUTION_TOOLS.has(tool)) {
+        throw new Error(`PREVIEW_REFUSED: "${tool}" is not a registered execution tool.`);
+      }
+      const sanitized = this.sanitizeArgs(tool, (args?.args ?? {}) as Record<string, unknown>);
+      const hash = canonicalArgsHash({ agent: this.agentName, tool, args: sanitized });
+      const createdAt = Date.now();
+      this.previewStore.set(hash, { tool, args: sanitized, createdAt });
+      const expired = [...this.previewStore.entries()].filter(([, v]) => createdAt - v.createdAt > TWO_PHASE_TTL_MS);
+      for (const [k] of expired) this.previewStore.delete(k);
+      this.audit(name, hash, true, "preview stored");
+      return {
+        phase: "preview",
+        executionHash: hash,
+        tool,
+        netEffect: this.netEffect(tool, sanitized),
+        expiresAt: new Date(createdAt + TWO_PHASE_TTL_MS).toISOString(),
+        note: "Nothing executed. Confirm with furlpay_confirm_execution { executionHash }. Above your agent policy's daily cap the CLI human is the only approver.",
+      };
+    }
+
+    if (name === "furlpay_confirm_execution") {
+      if (this.mode !== "execution") {
+        throw new Error(`EXECUTION_MODE_REQUIRED: confirm executes value movement — this server runs READ-ONLY.`);
+      }
+      const hash = sanitizeUntrusted(args?.executionHash, 80);
+      const entry = this.previewStore.get(hash);
+      if (!entry) {
+        throw new Error(`CONFIRM_WITHOUT_PREVIEW: no live preview for ${hash}. Preview first via furlpay_preview_execution.`);
+      }
+      if (Date.now() - entry.createdAt > TWO_PHASE_TTL_MS) {
+        this.previewStore.delete(hash);
+        throw new Error(`PREVIEW_EXPIRED: preview ${hash} expired — re-preview the execution.`);
+      }
+      // Single-use: delete BEFORE executing so a replayed confirm can never
+      // double-execute even if the tool itself throws.
+      this.previewStore.delete(hash);
+      // Attempts count against the rate limit even when the policy gate
+      // refuses — a hammering agent is throttled before it is reasoned with.
+      this.checkMutatingRate();
+      // Policy gate re-runs on the STORED amount, not anything the caller
+      // passed to confirm. All MCP execution amounts are USD-denominated —
+      // the policy whitelist is checked in USDC terms.
+      const gate = this.policyAmountFor(entry.tool, entry.args);
+      this.requirePolicyGate(gate, "USDC");
+      this.audit(entry.tool, hash, true, "confirmed");
+      return await this.handleCall(entry.tool, entry.args, true);
+    }
+
+    if (EXECUTION_TOOLS.has(name) && !viaConfirm) {
+      // Direct dispatch of a mutating tool: refused everywhere. In
+      // read-only mode the message points at the mode; in execution mode it
+      // points at the two-phase protocol.
+      if (this.mode !== "execution") {
+        this.audit(name, argsHash, false, "read-only mode");
+        throw this.executionRefusal(name);
+      }
+      this.audit(name, argsHash, false, "two-phase required");
+      throw new Error(
+        `TWO_PHASE_REQUIRED: "${name}" cannot be called directly. Preview via furlpay_preview_execution ` +
+          `(returns an executionHash + net effect), then furlpay_confirm_execution { executionHash }.`
+      );
+    }
+
+    if (EXECUTION_TOOLS.has(name)) {
+      this.checkMutatingRate();
+    }
+
     const loadedAgent = this.agentKeyService.loadAgentPolicy(this.agentName);
     const policy = loadedAgent?.policy;
 
@@ -551,6 +901,107 @@ export class McpStdioServer {
 
       case "furlpay_get_quote": {
         return await this.router.findBestRoute(args.sourceAsset, args.targetAsset, args.amount);
+      }
+
+      // ── Financial Operations Layer: READ-ONLY by design ─────────────────
+      // No finance tool here can create payments, approve requests, or change
+      // limits. Money movement authorization is a human CLI action; an MCP
+      // agent can read the same ledger the human audits, nothing more.
+      case "furlpay_finance_overview": {
+        const fin = this.getFinance();
+        return {
+          readOnlyNotice: "MCP finance tools are inspection-only; payments, approvals and limit changes happen in the CLI by a human.",
+          accounts: fin.ledger.listAccounts().map((a) => ({ id: a.id, kind: a.kind, unit: a.unit, network: a.network ?? null, role: a.role ?? null })),
+          spendLimits: Object.fromEntries(Object.entries(fin.spend.getLimits()).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])),
+          settlementCapabilities: fin.payments.settlementCapabilities(),
+        };
+      }
+      case "furlpay_finance_ledger": {
+        const fin = this.getFinance();
+        if (args.reconcile === true) return fin.ledger.reconcile();
+        return {
+          transactions: fin.ledger
+            .listTransactions()
+            .slice(-(args.limit ?? 10))
+            .reverse()
+            .map((t) => ({
+              id: t.id, seq: t.seq, type: t.type, state: t.state,
+                  entries: t.entries.map((e) => ({ account: e.accountId, direction: e.direction, minor: e.minor.toString(), unit: e.unit })),
+                  txHash: t.txHash ?? null, createdAt: t.createdAt,
+            })),
+        };
+      }
+      case "furlpay_finance_spend": {
+        const fin = this.getFinance();
+        const unit = args.unit ?? "USDC";
+        const u = fin.spend.usage(unit);
+        return {
+          unit,
+          usage: { total: u.total.toString(), today: u.today.toString(), thisWeek: u.thisWeek.toString(), thisMonth: u.thisMonth.toString() },
+          limits: Object.fromEntries(Object.entries(u.limits).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])),
+          breakdown: fin.spend.breakdown().map((b) => ({ unit: b.unit, minor: b.minor.toString(), transactions: b.transactions })),
+        };
+      }
+      case "furlpay_finance_treasury": {
+        const fin = this.getFinance();
+        const s = fin.treasury.status();
+        return {
+          balances: s.balances.map((b) => ({ ...b, availableMinor: b.availableMinor.toString(), reservedMinor: b.reservedMinor.toString(), totalMinor: b.totalMinor.toString() })),
+          inflowMinorByUnit: Object.fromEntries(Object.entries(s.inflowMinorByUnit).map(([k, v]) => [k, v.toString()])),
+          outflowMinorByUnit: Object.fromEntries(Object.entries(s.outflowMinorByUnit).map(([k, v]) => [k, v.toString()])),
+          note: s.note,
+        };
+      }
+      case "furlpay_finance_billing": {
+        const fin = this.getFinance();
+        const s = fin.billing.summary(args.sinceIso);
+        const b = (o: Record<string, bigint>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v.toString()]));
+        return { volumeOutMinorByUnit: b(s.volumeOutMinorByUnit), volumeInMinorByUnit: b(s.volumeInMinorByUnit), feesMinorByUnit: b(s.feesMinorByUnit), counts: s.counts };
+      }
+      case "furlpay_finance_payments": {
+        const fin = this.getFinance();
+        if (args.inspect) {
+          const p = fin.payments.get(args.inspect);
+          if (!p) throw new Error(`Unknown payment ${args.inspect}.`);
+          return { ...p, amount: { ...p.amount } };
+        }
+        return {
+          payments: fin.payments.history(args.limit ?? 10).map((p) => ({
+            id: p.id, state: p.state, unit: p.amount.unit, minor: p.amount.minor,
+                network: p.amount.network ?? null, destination: p.destination ?? null, txHash: p.txHash ?? null, createdAt: p.createdAt,
+          })),
+        };
+      }
+
+      case "furlpay_oracle_price": {
+        const asset = sanitizeUntrusted(String(args.asset ?? ""), 12).toUpperCase().trim();
+        if (!asset) throw new Error("furlpay_oracle_price requires an asset symbol (SOL, BTC, ETH, XLM, USDC).");
+        const quote = await new OraclePriceAggregator().getQuote(asset);
+        return {
+          asset: quote.asset,
+          status: quote.status,
+          priceUsd: quote.priceUsd,
+          readings: quote.readings.map((r) => ({ source: r.source, priceUsd: r.priceUsd })),
+          deviations: quote.deviations,
+          maxDeviationPct: quote.maxDeviationPct,
+          note: "Median of agreeing sources; DISAGREEMENT/UNAVAILABLE carry a null price by design — never a blended or guessed number.",
+        };
+      }
+
+      case "furlpay_solana_cluster_status": {
+        const client = new SolanaRpcClient();
+        try {
+          const epoch = await client.getEpochInfo();
+          return {
+            status: "LIVE",
+            rpc: client.describeEndpoint(),
+            mode: "read-only",
+            ...epoch,
+          };
+        } catch (err: any) {
+          // An RPC outage is surfaced, never papered over with slot 0.
+          return { status: "UNAVAILABLE", rpc: client.describeEndpoint(), error: err.message };
+        }
       }
 
       case "furlpay_list_chains": {
@@ -707,6 +1158,19 @@ export class McpStdioServer {
   }
 
   startStdio(): void {
+    // Runtime honesty banner (readiness P1/P7): the mode is on stderr on
+    // every startup — stdout stays clean for JSON-RPC.
+    if (this.mode === "read-only") {
+      console.error(
+        `[${new Date().toISOString()} MODE] READ-ONLY (default): research, analytics, quotes and balances only. ` +
+          `No execution tool is registered. Value movement needs --enable-execution with a configured agent policy.`
+      );
+    } else {
+      console.error(
+        `[${new Date().toISOString()} MODE] EXECUTION: value-moving tools are registered behind the two-phase protocol ` +
+          `(preview → confirm) and the agent policy gates of "${this.agentName}".`
+      );
+    }
     console.error(`[${new Date().toISOString()} INFO] FurlPay MCP Server initialized on stdio.`);
     const loaded = this.agentKeyService.loadAgentPolicy(this.agentName);
     if (loaded) {

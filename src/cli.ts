@@ -29,7 +29,7 @@ import { HlpVaultService } from "./hyperliquid/hlp";
 import { HyperliquidPerpService } from "./hyperliquid/perp";
 import { HyperliquidClient } from "./hyperliquid/client";
 import { MarketDataService } from "./services/market-data";
-import { HyperliquidRiskEngine } from "./hyperliquid/risk-engine";
+import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "./hyperliquid/risk-engine";
 import { EscrowStateMachine, EscrowTerms } from "./settlement/escrow";
 import { EscrowStore } from "./settlement/escrowStore";
 import { sanitizeTerminal } from "./tui/sanitize";
@@ -37,6 +37,10 @@ import { verifyTransaction, TxVerificationResult } from "./stellar/txVerify";
 import { requestFunds, isValidStellarAddress, FaucetResult, FaucetNetwork } from "./stellar/faucet";
 import { validateConfig } from "./config/validate";
 import { BinanceAdapter } from "./binance/binance.adapter";
+import { DurableEventStore, defaultBlotterPath } from "./blotter/durable-event-store";
+import { OraclePriceAggregator, ASSET_CONFIG } from "./oracles/aggregator";
+import { SolanaRpcClient, assertValidSolanaAddress } from "./solana/rpc";
+import { JupiterClient, KNOWN_MINTS } from "./solana/jupiter";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -170,7 +174,7 @@ export class FurlPayStellarCli {
     this.perp = new HyperliquidPerpService();
     this.marketData = new MarketDataService();
     this.hlClient = new HyperliquidClient();
-    this.riskEngine = new HyperliquidRiskEngine();
+    this.riskEngine = new HyperliquidRiskEngine(undefined, { turnoverLedgerPath: defaultTurnoverLedgerPath() });
   }
 
   async run(cliArgs: ParsedCliArgs): Promise<void> {
@@ -261,6 +265,18 @@ export class FurlPayStellarCli {
 
       case "config":
         await this.handleConfig(subcommand, args, flags);
+        break;
+
+      case "finance":
+        await this.handleFinance(subcommand, args, flags);
+        break;
+
+      case "oracle":
+        await this.handleOracle(subcommand, args, flags);
+        break;
+
+      case "solana":
+        await this.handleSolana(subcommand, args, flags);
         break;
 
       default:
@@ -432,7 +448,15 @@ export class FurlPayStellarCli {
           price: (price || (clean === "JQQQ" ? 104.2 : 1.0)).toString(),
           sponsor: flags.sponsor !== false,
         });
-        console.log(`[✓] Stellar SDEX Trade Executed! Filled ${result.filledAmount} ${clean} @ \$${result.price}`);
+        // Honesty first (external audit 2026-11-17b H-03): a simulated fill
+        // is a labeled simulation, never a green checkmark claiming a real
+        // broadcast. `result.simulated` is authoritative.
+        if (result.simulated) {
+          console.log(`[!] SIMULATED Stellar SDEX Trade — no transaction was built, signed or broadcast to Stellar.`);
+          console.log(`[i] Simulated fill: ${result.filledAmount} ${clean} @ \$${result.price} | sim hash: ${result.txHash?.slice(0, 14) ?? "n/a"}…`);
+        } else {
+          console.log(`[✓] Stellar SDEX Trade Executed! Filled ${result.filledAmount} ${clean} @ \$${result.price}`);
+        }
         return;
       } else {
         const result = await this.perp.executePerpOrder({
@@ -688,6 +712,222 @@ export class FurlPayStellarCli {
     }
   }
 
+  /**
+   * furlpay oracle — live multi-source USD price quotes (gap report Gap 2).
+   * Read-only: fans out to public sources, sanity-bands, medians, and gates
+   * on cross-source agreement. A DISAGREEMENT is printed as exactly that —
+   * never averaged away into a blended number. This command never signs,
+   * places, or broadcasts anything.
+   */
+  private async handleOracle(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = (subcommand || args[0] || "").toLowerCase().trim();
+    const json = flags.output === "json" || flags.json;
+    const aggregator = new OraclePriceAggregator();
+
+    if (sub === "sources" || sub === "status") {
+      const sources = aggregator.describeSources();
+      if (json) {
+        console.log(JSON.stringify({ command: "oracle sources", sources, supportedAssets: Object.keys(ASSET_CONFIG).sort() }, null, 2));
+      } else {
+        console.log("Oracle price sources (public, keyless, https-only):");
+        for (const s of sources) {
+          console.log(`  - ${s.id}`);
+          console.log(`      endpoint: ${s.endpoint}`);
+          console.log(`      assets:   ${s.assets.length ? s.assets.join(", ") : "(none)"}`);
+        }
+        console.log(`Supported assets: ${Object.keys(ASSET_CONFIG).sort().join(", ")}`);
+        console.log(`Optional gateway: Pyth Hermes (FURLPAY_PYTH_HERMES_URL + FURLPAY_PYTH_FEED_IDS) — the public Hermes endpoint is auth-gated (Pyth Pro), so that provider is inactive unless you configure a gateway you are authorized to use.`);
+      }
+      return;
+    }
+
+    let asset: string;
+    if (sub === "price") {
+      asset = (args[0] || flags.asset || "").toUpperCase().trim();
+    } else if (ASSET_CONFIG[sub.toUpperCase()]) {
+      asset = sub.toUpperCase();
+    } else {
+      console.log("Usage: furlpay oracle <price|sources> <ASSET> [--output json]");
+      console.log(`Supported assets: ${Object.keys(ASSET_CONFIG).sort().join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!asset) {
+      console.log("Usage: furlpay oracle price <ASSET> [--output json]");
+      process.exitCode = 1;
+      return;
+    }
+
+    const quote = await aggregator.getQuote(asset);
+    if (json) {
+      console.log(JSON.stringify(quote, null, 2));
+    } else {
+      const bandText = Number.isFinite(quote.sanityBand.maxUsd)
+        ? `$${quote.sanityBand.minUsd} – $${quote.sanityBand.maxUsd}`
+        : `unknown asset (supported: ${Object.keys(ASSET_CONFIG).sort().join(", ")})`;
+      console.log(`Oracle quote — ${quote.asset}/USD (${new Date(quote.fetchedAt).toISOString()})`);
+      console.log(`  Sanity band: ${bandText} | Agreement budget: ±${quote.maxDeviationPct}%`);
+      if (quote.readings.length === 0) {
+        console.log(`  Status: UNAVAILABLE — no source answered with a sane ${quote.asset} price. Nothing is guessed.`);
+      } else {
+        for (let i = 0; i < quote.readings.length; i++) {
+          const r = quote.readings[i];
+          const d = quote.deviations[i]?.deviationPct ?? 0;
+          console.log(`  [${r.source}] $${r.priceUsd} (${d >= 0 ? "+" : ""}${d.toFixed(3)}% vs median)`);
+        }
+        if (quote.status === "LIVE") {
+          const single = quote.readings.length === 1 ? " — SINGLE SOURCE, no cross-check possible" : "";
+          console.log(`  Status: LIVE — median $${quote.priceUsd} across ${quote.readings.length} agreeing source(s)${single}`);
+        } else {
+          console.log(`  Status: DISAGREEMENT — sources disagree beyond ±${quote.maxDeviationPct}%. No blended price is printed; inspect the outlier above.`);
+        }
+      }
+    }
+    if (quote.status !== "LIVE") {
+      process.exitCode = quote.status === "DISAGREEMENT" ? 1 : 2;
+    }
+  }
+
+  /**
+   * furlpay solana — live READ-ONLY Solana surface (gap report Gap 5, first
+   * slice). Real RPC reads (cluster status, lamport balance) and indicative
+   * Jupiter quotes. No key handling exists in this path: nothing here can
+   * sign or broadcast, and every output says so.
+   */
+  private async handleSolana(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = (subcommand || "status").toLowerCase().trim();
+    const json = flags.output === "json" || flags.json;
+
+    if (sub === "status") {
+      const client = new SolanaRpcClient();
+      try {
+        const epoch = await client.getEpochInfo();
+        const progressPct = (epoch.slotIndex / epoch.slotsInEpoch) * 100;
+        if (json) {
+          console.log(JSON.stringify({
+            command: "solana status",
+            rpc: client.describeEndpoint(),
+            mode: "read-only",
+            ...epoch,
+            epochProgressPct: Number(progressPct.toFixed(2)),
+          }, null, 2));
+        } else {
+          console.log(`Solana cluster status — ${client.describeEndpoint()} (read-only)`);
+          console.log(`  Epoch:          ${epoch.epoch} (${progressPct.toFixed(1)}% complete)`);
+          console.log(`  Absolute slot:  ${epoch.absoluteSlot}`);
+          console.log(`  Block height:   ${epoch.blockHeight}`);
+          console.log(`  Tx count:       ${epoch.transactionCount ?? "unavailable"}`);
+          console.log(`  [i] Live RPC reads only — this build does not sign or broadcast Solana transactions.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana status", error: err.message }, null, 2));
+        else console.error(`[!] Solana RPC unreachable: ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    if (sub === "balance") {
+      const address = (args[0] || flags.address || "").trim();
+      if (!address) {
+        console.log("Usage: furlpay solana balance <base58-address> [--output json]");
+        process.exitCode = 1;
+        return;
+      }
+      const client = new SolanaRpcClient();
+      try {
+        const lamports = await client.getBalanceLamports(address);
+        const sol = lamports / 1e9;
+        if (json) {
+          console.log(JSON.stringify({ command: "solana balance", address, lamports, sol, mode: "read-only" }, null, 2));
+        } else {
+          console.log(`Solana balance — ${address}`);
+          console.log(`  ${lamports.toLocaleString("en-US")} lamports (${sol} SOL)`);
+          console.log(`  [i] Live RPC read. No signing, no broadcasting in this build.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana balance", error: err.message }, null, 2));
+        else console.error(`[!] ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    if (sub === "price") {
+      const target = (args[0] || flags.mint || "").trim();
+      if (!target) {
+        const aliases = Object.keys(KNOWN_MINTS).join(", ");
+        console.log(`Usage: furlpay solana price <mint-or-alias> [--output json]`);
+        console.log(`Known aliases: ${aliases}. Any valid base58 mint address is accepted.`);
+        process.exitCode = 1;
+        return;
+      }
+      const jupiter = new JupiterClient();
+      const price = await jupiter.priceUsd(target);
+      if (!price) {
+        if (json) console.log(JSON.stringify({ command: "solana price", target, status: "UNAVAILABLE" }, null, 2));
+        else console.error(`[!] Jupiter price unavailable for ${target} — no price is guessed.`);
+        process.exitCode = 2;
+        return;
+      }
+      if (json) {
+        console.log(JSON.stringify({ command: "solana price", status: "LIVE", source: "jupiter:solana", ...price }, null, 2));
+      } else {
+        console.log(`Solana price — ${price.mint}`);
+        console.log(`  USD price:        $${price.usdPrice}`);
+        console.log(`  Liquidity:        ${price.liquidityUsd === null ? "unavailable" : "$" + Math.round(price.liquidityUsd).toLocaleString("en-US")}`);
+        console.log(`  24h change:       ${price.priceChange24hPct === null ? "unavailable" : price.priceChange24hPct.toFixed(2) + "%"}`);
+        console.log(`  Decimals:         ${price.decimals ?? "unavailable"}`);
+        console.log(`  Source:           Jupiter price v3 (live read)`);
+      }
+      return;
+    }
+
+    if (sub === "quote") {
+      const [inMint, outMint, rawAmount] = args;
+      if (!inMint || !outMint || !rawAmount) {
+        console.log("Usage: furlpay solana quote <input-mint|alias> <output-mint|alias> <raw-amount> [--slippage-bps 50] [--output json]");
+        console.log("raw-amount is an integer of the input mint's smallest unit (e.g. 100000000 = 0.1 SOL).");
+        process.exitCode = 1;
+        return;
+      }
+      const slippageBps = flags["slippage-bps"] !== undefined ? parseInt(flags["slippage-bps"], 10) : 50;
+      const jupiter = new JupiterClient();
+      try {
+        const quote = await jupiter.quote({
+          inputMint: inMint,
+          outputMint: outMint,
+          amount: rawAmount,
+          slippageBps: Number.isFinite(slippageBps) ? slippageBps : 50,
+        });
+        if (!quote) {
+          if (json) console.log(JSON.stringify({ command: "solana quote", status: "UNAVAILABLE" }, null, 2));
+          else console.error("[!] Jupiter quote unavailable — no route is fabricated.");
+          process.exitCode = 2;
+          return;
+        }
+        if (json) {
+          console.log(JSON.stringify({ command: "solana quote", ...quote }, null, 2));
+        } else {
+          console.log(`Jupiter indicative quote (${quote.swapMode}) — execution: ${quote.execution}`);
+          console.log(`  Input:   ${quote.inAmount} (${quote.inputMint})`);
+          console.log(`  Output:  ${quote.outAmount} (${quote.outputMint})`);
+          console.log(`  Route:   ${quote.routeLabels.join(" → ") || "direct"}`);
+          console.log(`  Slippage: ${quote.slippageBps} bps | Price impact: ${quote.priceImpactPct ?? "unavailable"}`);
+          console.log(`  [!] INDICATIVE ROUTING INFORMATION ONLY — this build has no Solana signing path; nothing here can fill this quote.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana quote", error: err.message }, null, 2));
+        else console.error(`[!] ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    console.log("Usage: furlpay solana <status|balance|price|quote> [--output json]");
+    process.exitCode = 1;
+  }
+
   private async handleAccount(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
     const sub = subcommand || args[0] || "balance";
     const address = flags.address || process.env.HYPERLIQUID_WALLET_ADDRESS || "0x0000000000000000000000000000000000000000";
@@ -760,8 +1000,12 @@ export class FurlPayStellarCli {
 
     if (sub === "kill-switch") {
       console.log(`[!] INITIATING EMERGENCY TRADING KILL SWITCH...`);
-      const res = await this.perp.triggerKillSwitch();
-      console.log(`[✓] KILL SWITCH COMPLETE:`);
+      // --symbol scopes the blast radius (external audit M-05): the panic
+      // hotkey says "--symbol BTC" — the CLI must honor it, not liquidate
+      // the whole book.
+      const scope = flags.symbol || flags["symbol"];
+      const res = await this.perp.triggerKillSwitch(undefined, scope);
+      console.log(`[✓] KILL SWITCH COMPLETE${res.scopedTo ? ` (SCOPED TO ${res.scopedTo})` : " (ACCOUNT-WIDE)"}:`);
       console.log(`    - Canceled Orders:   ${res.canceledOrders}`);
       console.log(`    - Closed Positions:  [${res.closedPositions.join(", ") || "None"}]`);
       return;
@@ -786,11 +1030,48 @@ export class FurlPayStellarCli {
       console.error(`[!] Unknown FURLPAY_BINANCE_ENV "${envRaw}" — using testnet (explicit values: testnet, mainnet).`);
     }
 
-    const adapter = new BinanceAdapter({ env });
+    // Durable audit blotter (M-02): Binance intents/outcomes land in the
+    // same hash-chained ledger as the Hyperliquid path. Creation failure
+    // degrades to an in-memory blotter (best-effort audit, never a blocker).
+    const binanceBlotter = (() => {
+      try {
+        return new DurableEventStore({ filePath: defaultBlotterPath() });
+      } catch {
+        return new DurableEventStore();
+      }
+    })();
+    const adapter = new BinanceAdapter({ env, blotter: binanceBlotter });
 
     // Agent-trust gate: with a delegated policy, orders validate + record
     // spend through AgentKeyService before the adapter builds a request.
+    // WITHOUT a delegated policy (external audit 2026-11-17b H-01) the old
+    // gate silently auto-authorized — a live, uncapped market order from a
+    // single command. Now: interactive humans confirm; non-interactive
+    // callers must carry explicit --yes, or the order is refused.
     const walletName = flags.wallet || flags["wallet"];
+    const requireUnmandatedConsent = async (what: string): Promise<void> => {
+      if (walletName) return; // delegated policy authorizes below
+      if (flags.yes === true || flags.y === true) {
+        console.error(`[!] Unmandated ${what} executed with explicit --yes consent (no spend cap active).`);
+        return;
+      }
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error(
+          `UNMANDATED_EXECUTION_REFUSED: ${what} without --wallet <agent> would bypass every spend cap. ` +
+            `Pass --yes to accept uncapped live execution explicitly, or create a delegated policy ` +
+            `(\`furlpay wallet agent-keygen\`) and use --wallet <agent>.`
+        );
+      }
+      // Interactive human: re-engage on the exact economics before money moves.
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((res) => {
+        rl.question(`Execute REAL-MONEY ${what}? Type "execute" to confirm: `, res);
+      });
+      rl.close();
+      if (answer.trim().toLowerCase() !== "execute") {
+        throw new Error(`Confirmation did not match — ${what} aborted.`);
+      }
+    };
     const mandateCheck = (intent: { symbol: string; side: string; notionalUsd: number }) => {
       if (!walletName) return { authorized: true };
       const gate = this.agentKeys.validateAndRecordSpend(walletName, intent.notionalUsd, "USDC");
@@ -832,6 +1113,7 @@ export class FurlPayStellarCli {
         if (!Number.isFinite(quote) || quote <= 0) {
           throw new Error("Market buys require --quote <usd> (a positive quote amount).");
         }
+        await requireUnmandatedConsent(`market BUY ${symbol.toUpperCase()} for $${quote} on Binance (${env})`);
         const res = await adapter.marketOrder(
           { symbol, side: "BUY", notionalUsd: quote, agentAddress: walletName || "cli" },
           mandateCheck
@@ -843,6 +1125,7 @@ export class FurlPayStellarCli {
       if (!qty) {
         throw new Error("Market sells require --qty <quantity> (an exact base quantity; never derived from a float price).");
       }
+      await requireUnmandatedConsent(`market SELL ${symbol.toUpperCase()} x${qty} on Binance (${env})`);
       const res = await adapter.marketSell(symbol, qty, mandateCheck);
       console.log(`[✓] Market SELL ${symbol.toUpperCase()} — ${res.status} (orderId ${res.orderId}, ${env})`);
       return;
@@ -1226,7 +1509,21 @@ export class FurlPayStellarCli {
 
   private async handleMcp(args: string[], flags: Record<string, any>): Promise<void> {
     const wallet = flags.wallet || "default-agent";
-    const server = new McpStdioServer(wallet);
+    // P7 DEFAULTS: read-only unless execution is EXPLICITLY enabled — and
+    // execution mode additionally requires an already-configured agent
+    // policy for the named wallet. A fresh install cannot move funds.
+    const wantsExecution =
+      flags["enable-execution"] === true || flags.mode === "execution" || flags["allow-execution"] === true;
+    const server = new McpStdioServer(wallet, { mode: wantsExecution ? "execution" : "read-only" });
+    if (wantsExecution) {
+      if (!server.hasAgentPolicy()) {
+        console.error(`[!] Execution mode refused: no agent policy named "${wallet}" is configured.`);
+        console.error(`    Create one first: furlpay wallet agent-keygen --name ${wallet}`);
+        console.error(`    A policy file is the spend-cap authority for execution mode — no policy, no execution.`);
+        process.exitCode = 47;
+        return;
+      }
+    }
     server.startStdio();
   }
 
@@ -1528,6 +1825,370 @@ export class FurlPayStellarCli {
     console.log("Usage: furlpay config <show|path|get|set|validate>");
   }
 
+  // ── Financial Operations Layer ─────────────────────────────────────────────
+  //
+  // `furlpay finance` is the local financial operations surface: a durable
+  // double-entry ledger, idempotent payment records, fail-closed spend
+  // limits, human-approved payment authorization, treasury views, billing
+  // reports and signed financial events. Settlement capability is honest —
+  // see `finance status`; nothing here claims an on-chain adapter it does
+  // not have, and submission is never settlement.
+  private async handleFinance(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const { FinanceManager } = await import("./finance/manager");
+    const { assertHumanApproval, HUMAN_APPROVAL_EXIT_CODE } = await import("./finance/humanGate");
+    const money = await import("./finance/money");
+    const fin = new FinanceManager({ webhookUrl: process.env.FURLPAY_FINANCE_WEBHOOK_URL?.trim() || undefined });
+    const area = subcommand || args[0];
+    const sub = subcommand ? args[0] : args[1];
+    const rest = subcommand ? args.slice(1) : args.slice(2);
+
+    const usageLine = () =>
+      console.log(
+        [
+          "Usage: furlpay finance <area> <command> [flags]",
+          "  init            --unit USDC [--network base]        create the standard account skeleton",
+          "  status                                            accounts, limits, settlement capabilities",
+          "  ledger          list|reconcile|export|inspect <id>",
+          "  spend           show --unit USDC | set-limit <daily|weekly|monthly|total|per-transaction> <amount> --unit USDC | breakdown | history",
+          "  approval        list | inspect <id> | approve <id> --amount --unit --destination [--network --fee] | deny <id> --reason",
+          "  payment         create --amount 25 --unit USDC --destination <addr> [--network base --fee 0.01 --approval-id <id> --idempotency-key <k>]",
+          "                  | inspect <id> | receipt <id> | history | cancel <id> --reason",
+          "                  | confirm <id> --tx-hash <hash>      (attach real evidence)",
+          "                  | settle <id>                        (only after confirm)",
+          "  treasury        status | reconcile",
+          "  billing         summary [--since ISO] | export [--out file.csv]",
+          "  events          list | verify --seq <n>",
+        ].join("\n")
+      );
+
+    switch (area) {
+      case "init": {
+        const unit = String(flags.unit ?? "USDC").toUpperCase();
+        const network = flags.network ? String(flags.network).toLowerCase() : undefined;
+        const ids = fin.ensureStandardAccounts(unit, network);
+        console.log(`[+] Standard ${unit}${network ? ` (${network})` : ""} accounts ready:`);
+        for (const [k, v] of Object.entries(ids)) console.log(`    ${k.padEnd(10)} ${v}`);
+        return;
+      }
+
+      case "status": {
+        const accounts = fin.ledger.listAccounts();
+        console.log(`[i] Financial operations layer — ${accounts.length} account(s), ledger ${fin.ledger.filePathUsed}`);
+        for (const a of accounts) {
+          const b = fin.ledger.accountBalance(a.id);
+          console.log(`    ${a.id.padEnd(34)} ${a.kind.padEnd(9)} ${a.unit.padEnd(5)} settled=${b.settledMinor} pending=${b.pendingMinor}`);
+        }
+        const caps = fin.payments.settlementCapabilities();
+        console.log("[i] Settlement capabilities (honest):");
+        for (const c of caps) console.log(`    ${c.network.padEnd(14)} ${c.mode.padEnd(10)} ${c.note}`);
+        return;
+      }
+
+      case "ledger": {
+        if (sub === "list" || !sub) {
+          const txs = fin.ledger.listTransactions();
+          if (!txs.length) {
+            console.log("[i] Ledger is empty — `furlpay finance init` then `payment create`.");
+            return;
+          }
+          for (const t of txs.slice(-20).reverse()) {
+            console.log(`${t.id}  [${t.type}]  ${t.state}  seq=${t.seq}`);
+            for (const e of t.entries) console.log(`    ${e.direction.padEnd(6)} ${String(e.minor).padStart(14)} ${e.unit}${e.network ? ":" + e.network : ""} → ${e.accountId}`);
+          }
+          return;
+        }
+        if (sub === "inspect") {
+          const t = fin.ledger.getTransaction(rest[0] ?? "");
+          if (!t) throw new Error(`Unknown ledger transaction ${rest[0]}`);
+          console.log(JSON.stringify(t, null, 2));
+          return;
+        }
+        if (sub === "reconcile") {
+          const r = fin.ledger.reconcile();
+          console.log(`[${r.chainValid ? "+" : "!"}] chain ${r.chainValid ? "valid" : "INVALID"} · ${r.balancedTransactions}/${r.checkedTransactions} balanced`);
+          for (const d of r.discrepancies) console.log(`[!] ${d}`);
+          if (!r.discrepancies.length) console.log("[i] Internally consistent. External on-chain reality is verified separately (tx verify / provider lookups) — never asserted here.");
+          return;
+        }
+        if (sub === "export") {
+          const csv = fin.billing.exportCsv();
+          if (flags.out) {
+            const fs = await import("fs");
+            await fs.promises.writeFile(String(flags.out), csv, { mode: 0o600 });
+            console.log(`[+] Exported to ${flags.out}`);
+            return;
+          }
+          console.log(csv);
+          return;
+        }
+        usageLine();
+        return;
+      }
+
+      case "spend": {
+        const unit = String(flags.unit ?? "USDC").toUpperCase();
+        if (sub === "show" || !sub) {
+          const u = fin.spend.usage(unit);
+          const f = (v?: bigint) => (v === undefined ? "unlimited" : `${v} minor`);
+          console.log(`[i] Spend usage (${unit}):`);
+          console.log(`    today=${u.today}  week=${u.thisWeek}  month=${u.thisMonth}  total=${u.total}`);
+          console.log(`    limits: per-tx=${f(u.limits.perTransactionMinor)} daily=${f(u.limits.dailyMinor)} weekly=${f(u.limits.weeklyMinor)} monthly=${f(u.limits.monthlyMinor)} total=${f(u.limits.totalMinor)}`);
+          return;
+        }
+        if (sub === "set-limit") {
+          const field = rest[0];
+          const amount = rest[1];
+          const allowed = ["daily", "weekly", "monthly", "total", "per-transaction"];
+          if (!allowed.includes(field)) throw new Error(`Limit must be one of ${allowed.join(", ")}`);
+          const minor = money.parseMinor(amount, money.tokenDecimals(unit));
+          const key = ({ daily: "dailyMinor", weekly: "weeklyMinor", monthly: "monthlyMinor", total: "totalMinor", "per-transaction": "perTransactionMinor" } as const)[field as "daily"];
+          fin.spend.setLimits({ [key]: minor } as never);
+          console.log(`[+] ${field} spend limit for ${unit} set to ${minor} minor units.`);
+          return;
+        }
+        if (sub === "breakdown") {
+          const rows = fin.spend.breakdown();
+          if (!rows.length) {
+            console.log("[i] No spending recorded yet.");
+            return;
+          }
+          for (const r of rows) console.log(`    ${r.unit.padEnd(6)} ${String(r.minor).padStart(14)} minor   ${r.transactions} tx(s)`);
+          return;
+        }
+        if (sub === "history") {
+          const rows = fin.spend.history(20);
+          if (!rows.length) {
+            console.log("[i] No spending recorded yet.");
+            return;
+          }
+          for (const r of rows) console.log(`    ${r.at}  ${r.state.padEnd(10)} ${String(r.minor).padStart(12)} ${r.unit}  ${r.id}`);
+          return;
+        }
+        usageLine();
+        return;
+      }
+
+      case "approval": {
+        if (sub === "list" || !sub) {
+          const open = fin.approvals.list({ state: "open" });
+          const all = open.length ? open : fin.approvals.list().slice(0, 10);
+          if (!all.length) {
+            console.log("[i] No approval requests.");
+            return;
+          }
+          for (const r of all) {
+            console.log(`    ${r.id}  ${r.state.padEnd(16)} ${r.params.minor} minor ${r.params.unit} → ${r.params.destination}${r.params.network ? ` (${r.params.network})` : ""}`);
+            console.log(`        risk=${r.riskAssessment.level}  expires=${r.expiresAt}`);
+          }
+          return;
+        }
+        if (sub === "inspect") {
+          const r = fin.approvals.get(rest[0] ?? "");
+          if (!r) throw new Error(`Unknown approval ${rest[0]}`);
+          console.log(JSON.stringify(r, null, 2));
+          return;
+        }
+        if (sub === "approve") {
+          const id = rest[0];
+          const stored = fin.approvals.get(id ?? "");
+          if (!stored) throw new Error(`Unknown approval ${id}`);
+          // HUMAN APPROVAL MUST BE HUMAN (readiness P23): either an
+          // interactive TTY with a typed challenge, or a separate approver
+          // credential (FURLPAY_FINANCE_APPROVER_TOKEN) presented via
+          // --approver. A non-interactive call with neither is refused with
+          // exit code 46 — a scripted call is not a human decision.
+          const gate = await assertHumanApproval(
+            { minor: stored.params.minor, destination: stored.params.destination },
+            {
+              isTty: process.stdout.isTTY === true,
+              approverToken: flags.approver ? String(flags.approver) : undefined,
+              expectedToken: process.env.FURLPAY_FINANCE_APPROVER_TOKEN?.trim(),
+              prompt: (question) => {
+                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                return new Promise<string>((res) => {
+                  rl.question(question, res);
+                  rl.close();
+                });
+              },
+            },
+          );
+          if (!gate.ok) {
+            console.error(`[!] ${gate.reason}`);
+            process.exitCode = HUMAN_APPROVAL_EXIT_CODE;
+            return;
+          }
+          // The human approves the STORED parameters exactly as `inspect`
+          // showed them — reconstructed verbatim so the hash matches the
+          // request. The binding that catches parameter substitution runs
+          // again at execution time (reserve/assertBinding), where the
+          // orchestrator re-presents the LIVE transaction parameters.
+          const req = fin.approvals.approve(id, {
+            minor: BigInt(stored.params.minor),
+            unit: stored.params.unit,
+            network: stored.params.network,
+            destination: stored.params.destination,
+            source: stored.params.source,
+            type: stored.params.type,
+            feeMinor: stored.params.feeMinor !== undefined ? BigInt(stored.params.feeMinor) : undefined,
+          });
+          await fin.events.emit("spend.approval_granted", { approvalId: req.id, params: req.params });
+          console.log(`[+] Approved ${req.id} for ${req.params.minor} minor ${req.params.unit} → ${req.params.destination}${req.params.network ? ` (${req.params.network})` : ""}`);
+          console.log(`    Re-run your payment create with --approval-id ${req.id} — the approval is bound to these exact parameters and is single-use.`);
+          return;
+        }
+        if (sub === "deny") {
+          const reason = String(flags.reason ?? "denied by user");
+          const req = fin.approvals.deny(rest[0] ?? "", reason);
+          await fin.events.emit("spend.approval_denied", { approvalId: req.id, reason });
+          console.log(`[+] Denied ${req.id}.`);
+          return;
+        }
+        usageLine();
+        return;
+      }
+
+      case "payment": {
+        if (sub === "create") {
+          const unit = String(flags.unit ?? "USDC").toUpperCase();
+          const network = flags.network ? String(flags.network).toLowerCase() : undefined;
+          if (!flags.amount) throw new Error("--amount is required");
+          const amount = network
+            ? money.token(unit, network, String(flags.amount))
+            : money.fiat(unit === "USD" ? "USD" : unit, String(flags.amount));
+          const destination = String(flags.destination ?? "");
+          if (!destination) throw new Error("--destination is required");
+          const ids = fin.ensureStandardAccounts(
+            amount.kind === "token" ? amount.asset : amount.currency,
+            amount.kind === "token" ? amount.network : undefined
+          );
+          const feeMinor = flags.fee ? money.parseMinor(String(flags.fee), amount.kind === "token" ? amount.decimals : 2) : 0n;
+          const result = fin.payments.createOutPayment({
+            amount,
+            destination,
+            sourceAccountId: String(flags["source-account"] ?? ids.sourceId),
+            destinationAccountId: ids.sourceId,
+            counterAccountId: ids.counterId,
+            feeAccountId: ids.feesId,
+            feeMinor,
+            idempotencyKey: flags["idempotency-key"] ? String(flags["idempotency-key"]) : undefined,
+            approvalId: flags["approval-id"] ? String(flags["approval-id"]) : undefined,
+            counterpartyRef: destination,
+          });
+          if ("paramsHash" in result) {
+            const req = result as any;
+            console.log(`[!] Human approval required. Request ${req.id} created:`);
+            console.log(`    ${req.params.minor} minor ${req.params.unit} → ${req.params.destination}${req.params.network ? ` (${req.params.network})` : ""}`);
+            console.log(`    Review: furlpay finance approval inspect ${req.id}`);
+            console.log(`    Approve: furlpay finance approval approve ${req.id} --amount ${flags.amount} --unit ${unit}${network ? ` --network ${network}` : ""} --destination ${destination}${flags.fee ? ` --fee ${flags.fee}` : ""}`);
+            console.log(`    Then re-run this create with --approval-id ${req.id}`);
+            return;
+          }
+          const p = result as any;
+          console.log(`[+] Payment ${p.id} recorded (${p.state}) — ${p.amount.minor} minor ${p.amount.unit}${p.amount.network ? ` (${p.amount.network})` : ""} → ${destination}`);
+          if (!p.txHash) console.log("[i] No network evidence yet — `payment confirm <id> --tx-hash <real hash>` attaches it. Submission is never settlement.");
+          return;
+        }
+        if (sub === "inspect" || sub === "status") {
+          const p = fin.payments.get(rest[0] ?? "");
+          if (!p) throw new Error(`Unknown payment ${rest[0]}`);
+          console.log(JSON.stringify(p, null, 2));
+          return;
+        }
+        if (sub === "receipt") {
+          console.log(fin.payments.receipt(rest[0] ?? ""));
+          return;
+        }
+        if (sub === "history") {
+          const rows = fin.payments.history(20);
+          if (!rows.length) {
+            console.log("[i] No payments recorded.");
+            return;
+          }
+          for (const p of rows) console.log(`    ${p.createdAt}  ${p.state.padEnd(10)} ${p.amount.minor.padStart(12)} ${p.amount.unit}  → ${p.destination ?? "?"}  ${p.id}`);
+          return;
+        }
+        if (sub === "cancel") {
+          const p = fin.payments.cancel(rest[0] ?? "", String(flags.reason ?? "cancelled by user"));
+          console.log(`[+] Payment ${p.id} → ${p.state}.`);
+          return;
+        }
+        if (sub === "confirm") {
+          const txHash = String(flags["tx-hash"] ?? "");
+          if (!txHash) throw new Error("--tx-hash with a REAL transaction hash is required — the ledger refuses fabricated references.");
+          const submitted = fin.payments.markSubmitted(rest[0] ?? "", txHash);
+          const confirmed = fin.payments.markConfirmed(submitted.id, "operator-asserted evidence attached");
+          console.log(`[+] Payment ${confirmed.id} → ${confirmed.state} (evidence ${txHash.slice(0, 18)}…, operator_asserted).`);
+          console.log(`[i] Settlement needs chain-verified evidence — a provider receipt check (destination, amount, success) is not wired in this build, so the payment stays CONFIRMED-unverified.`);
+          return;
+        }
+        if (sub === "settle") {
+          const p = fin.payments.markSettled(rest[0] ?? "");
+          console.log(`[+] Payment ${p.id} → SETTLED.`);
+          return;
+        }
+        usageLine();
+        return;
+      }
+
+      case "treasury": {
+        const s = fin.treasury.status();
+        console.log("[i] Treasury balances (local ledger of record):");
+        for (const b of s.balances) console.log(`    ${b.accountId.padEnd(34)} available=${b.availableMinor} reserved=${b.reservedMinor} total=${b.totalMinor}`);
+        console.log(`[i] ${s.note}`);
+        if (sub === "reconcile") {
+          const r = fin.treasury.reconcile();
+          console.log(`[${r.chainValid ? "+" : "!"}] chain ${r.chainValid ? "valid" : "INVALID"} · ${r.balancedTransactions}/${r.checkedTransactions} balanced · ${r.discrepancies.length} discrepancy(ies)`);
+          for (const d of r.discrepancies) console.log(`[!] ${d}`);
+        }
+        return;
+      }
+
+      case "billing": {
+        if (sub === "export") {
+          const csv = fin.billing.exportCsv();
+          if (flags.out) {
+            const fs = await import("fs");
+            await fs.promises.writeFile(String(flags.out), csv, { mode: 0o600 });
+            console.log(`[+] Exported to ${flags.out}`);
+            return;
+          }
+          console.log(csv);
+          return;
+        }
+        const s = fin.billing.summary(flags.since ? String(flags.since) : undefined);
+        const row = (o: Record<string, bigint>) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join("  ") || "(none)";
+        console.log(`[i] Billing summary${s.windowStartIso ? ` (since ${s.windowStartIso})` : ""}:`);
+        console.log(`    volume out: ${row(s.volumeOutMinorByUnit)}`);
+        console.log(`    volume in : ${row(s.volumeInMinorByUnit)}`);
+        console.log(`    fees      : ${row(s.feesMinorByUnit)}`);
+        console.log(`    states    : settled=${s.settledCount} pending=${s.pendingCount} failed=${s.failedCount}`);
+        return;
+      }
+
+      case "events": {
+        if (sub === "verify") {
+          const seq = Number(flags.seq ?? 0);
+          const ev = fin.events.recent(1000).find((e) => e.seq === seq);
+          if (!ev) throw new Error(`No event with seq ${seq} in the journal.`);
+          const ok = fin.events.verifyEnvelope(ev, { allowAnyTimestamp: true, expectSeq: seq });
+          console.log(ok ? `[+] Event ${seq} verifies (signature + payload hash).` : `[!] Event ${seq} FAILED verification.`);
+          process.exitCode = ok ? 0 : 1;
+          return;
+        }
+        const evs = fin.events.recent(20);
+        if (!evs.length) {
+          console.log("[i] No financial events recorded.");
+          return;
+        }
+        for (const e of evs.reverse()) console.log(`    #${e.seq}  ${e.type.padEnd(28)} ${new Date(e.timestampMs).toISOString()}  sig=${e.signature.slice(0, 12)}…`);
+        return;
+      }
+
+      default:
+        usageLine();
+    }
+  }
+
   private printHelp(): void {
     console.log(`
 FurlPay CLI — Stellar Tokenized Equities & Hyperliquid Trading Infrastructure
@@ -1547,6 +2208,9 @@ COMMANDS:
   x402         Inspect and settle HTTP 402 agent micropayment challenges (pay)
   mcp          Launch local Model Context Protocol server for AI agent runtimes
   config       Display, update, and validate CLI network, RPC, and keyring settings (show, path, get, set, validate)
+  finance      Local financial operations: double-entry ledger, payments, spend limits, approvals, treasury, billing (init, status, ledger, spend, approval, payment, treasury, billing, events)
+  oracle       Live multi-source USD price quotes with cross-source agreement gating (price, sources)
+  solana       Live read-only Solana RPC + Jupiter surface: cluster status, lamport balance, indicative quotes (status, balance, price, quote)
   tx verify    Verify a real Stellar transaction against Horizon (honest lookup semantics, --output json)
   faucet       Fund a testnet/futurenet account via the official Stellar Friendbot (refuses mainnet)
 `);

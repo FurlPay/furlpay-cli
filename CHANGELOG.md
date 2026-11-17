@@ -8,6 +8,70 @@ releases; patch releases are always safe to take.
 
 ## Unreleased
 
+Oracles & Solana live read-only surface (2026-11-17 gap report, Gaps 2 + 5).
+
+### Added
+
+- **Oracle layer** (`furlpay oracle price|sources`, MCP `furlpay_oracle_price`) —
+  live multi-source USD quotes fanned out across real public endpoints
+  (Coinbase spot, Kraken ticker, Binance USDT-cross, Jupiter Solana), medianed
+  and gated on per-asset cross-source agreement (±1–3%). Sanity bands per
+  asset (SOL $1–$2000 mirroring the web app's clamp rule). DISAGREEMENT
+  returns the per-source readings with a **null price** — a blend across
+  disagreeing sources is exactly the fabrication the CLI refuses to print;
+  UNAVAILABLE guesses nothing. An optional Pyth Hermes gateway provider is
+  structurally inactive until `FURLPAY_PYTH_HERMES_URL` +
+  `FURLPAY_PYTH_FEED_IDS` are configured (the public Hermes endpoint is
+  auth-gated since Pyth Pro, September 2026 — no unverified feed IDs ship
+  baked in), and it rejects stale publishes.
+- **Solana live read-only surface** (`furlpay solana status|balance|price|quote`,
+  MCP `furlpay_solana_cluster_status`) — real JSON-RPC reads against
+  mainnet-beta (epoch/slot/block height, lamport balances, `SOLANA_RPC_URL`
+  override) and indicative Jupiter price/route quotes. Addresses are
+  validated as base58 before any request; RPC protocol and HTTP errors
+  **throw** — never a synthetic slot or a fabricated route. Every output
+  states that this build has no Solana signing path: quotes are labeled
+  `INDICATIVE` routing information nothing in this CLI can fill. Execution
+  (when it ships) will go through the capability registry's live gate — this
+  module deliberately contains no signing path.
+- MCP server gains two read-only tools (35 total):
+  `furlpay_oracle_price`, `furlpay_solana_cluster_status`.
+- New offline regression suites: `test/oracle.test.js` (14 tests — agreement
+  gate, sanity bands, per-provider real-shape parsing, Pyth staleness),
+  `test/solana-live.test.js` (15 tests — fail-closed address validation,
+  RPC error surfacing, integer-amount enforcement, INDICATIVE labeling).
+
+
+
+### Security (readiness P7 — MCP defaults & human-in-the-loop)
+
+- **A fresh `furlpay mcp` cannot move funds.** The server now defaults to
+  READ-ONLY mode: every value-moving tool (settle invoice, treasury sweep,
+  trades, perps, cancels, payments) is structurally ABSENT from tools/list
+  and refused by the dispatcher. Execution requires `--enable-execution`
+  (or `--mode execution`) AND an already-configured agent policy file — the
+  policy is refused at startup otherwise, before any tool call is possible.
+- **Two-phase execution.** Mutating tools can no longer be called directly
+  even in execution mode (`TWO_PHASE_REQUIRED`). `furlpay_preview_execution`
+  binds sanitized arguments to a one-time hash and shows the net effect;
+  `furlpay_confirm_execution` is the only path that executes — single-use,
+  10-minute TTL, re-running the agent policy gate on the STORED amount, so a
+  confirm call can never smuggle a bigger number past the spend caps.
+- **Untrusted-data sanitizer + injection eval suite.** Venue strings, asset
+  names, memos and x402 headers are data: control characters and ANSI
+  escapes stripped, length-capped, and hash-bound before any downstream use.
+  An adversarial fixture suite (prompt-injection payloads in tool names,
+  arguments and memos; proto-pollution; rate-limit hammering) runs in CI.
+- **Per-call audit trail.** Every MCP call — allowed or refused — appends an
+  audit line (agent identity, mode, tool, args HASH, verdict) to
+  `~/.furlpay/mcp-audit.jsonl`; raw untrusted arguments never enter the log.
+  Mutating calls are rate-limited (30/min rolling default) and attempts
+  count even when the policy gate refuses them.
+- `lib/mcp.js` JS surface gets the same structural default: mutating tools
+  hidden from tools/list, dispatcher backstop, startup policy check.
+  `swap_tokens`, `earn_withdraw` and `set_card_controls` now carry the same
+  honest annotations the other mutating tools had.
+
 Remediation of the 2026-11-17 external audit verification (gap-closure branch).
 
 ### Security

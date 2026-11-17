@@ -133,9 +133,41 @@ When preparing financial transactions, call 'prepare_trade_ticket'. Never promis
       },
     ];
 
-    const messages = state.messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content }));
+    // Protocol-correct history (external audit 2026-11-17b M-04): an
+    // assistant turn that emitted tool_use blocks must be sent as a content
+    // ARRAY with those blocks, immediately followed by a tool_result user
+    // message — otherwise Anthropic returns HTTP 400 for unfulfilled tool
+    // uses on the next turn. Plain text turns stay plain strings.
+    const messages: Array<{ role: "user" | "assistant"; content: any }> = [];
+    for (const m of state.messages) {
+      if (m.role === "user") {
+        messages.push({ role: "user", content: m.content });
+      } else if (m.role === "assistant") {
+        const calls = m.toolCalls ?? [];
+        if (calls.length === 0) {
+          messages.push({ role: "assistant", content: m.content || "…" });
+        } else {
+          const blocks: any[] = [];
+          if (m.content) blocks.push({ type: "text", text: m.content });
+          for (const c of calls) {
+            blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input ?? {} });
+          }
+          messages.push({ role: "assistant", content: blocks });
+        }
+      } else if (m.role === "tool") {
+        // Stored tool result: { toolUseId, name, result } JSON in content.
+        try {
+          const t = JSON.parse(m.content);
+          messages.push({
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: t.toolUseId, content: String(t.result ?? "ok") }],
+          });
+        } catch {
+          // Malformed tool record: degrade to a text note, never a broken pair.
+          messages.push({ role: "user", content: `[tool result unavailable]` });
+        }
+      }
+    }
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -202,7 +234,22 @@ When preparing financial transactions, call 'prepare_trade_ticket'. Never promis
                 status: "pending",
               });
               await this.executeLocalTool(currentTool.id, currentTool.name, input);
-            } catch {}
+              // Fulfil the protocol (M-04): every tool_use gets a stored
+              // tool_result so the next request never sends unfulfilled use.
+              furlPayStore.addMessage({
+                id: `tool_${currentTool.id}`,
+                role: "tool",
+                content: JSON.stringify({ toolUseId: currentTool.id, name: currentTool.name, result: "ok" }),
+                timestamp: Date.now(),
+              });
+            } catch (e) {
+              furlPayStore.addMessage({
+                id: `tool_${currentTool.id}`,
+                role: "tool",
+                content: JSON.stringify({ toolUseId: currentTool.id, name: currentTool.name, result: `error: ${(e as Error)?.message?.slice(0, 120) ?? "failed"}` }),
+                timestamp: Date.now(),
+              });
+            }
             currentTool = null;
           }
         } catch {}
@@ -242,6 +289,15 @@ When preparing financial transactions, call 'prepare_trade_ticket'. Never promis
         status: "success",
       });
       await this.executeLocalTool(callId, "terminal_switch_market", { symbol: targetSym });
+      // M-04 parity: the tool_use recorded on this turn gets a stored
+      // tool_result too — a later API-path request must never inherit an
+      // unfulfilled use from a local-copilot turn.
+      furlPayStore.addMessage({
+        id: `tool_${callId}`,
+        role: "tool",
+        content: JSON.stringify({ toolUseId: callId, name: "terminal_switch_market", result: "ok" }),
+        timestamp: Date.now(),
+      });
       response = `Switched terminal market to ${targetSym}. L2 orderbook feeds resynchronized.`;
     }
     // 2. Trade Preparation Command
@@ -266,6 +322,13 @@ When preparing financial transactions, call 'prepare_trade_ticket'. Never promis
         orderType: "limit",
         limitPrice: px,
         leverage: 3,
+      });
+
+      furlPayStore.addMessage({
+        id: `tool_${callId}`,
+        role: "tool",
+        content: JSON.stringify({ toolUseId: callId, name: "prepare_trade_ticket", result: "ticket prepared" }),
+        timestamp: Date.now(),
       });
 
       response = `Prepared ${side.toUpperCase()} ticket for \$${amountUsd} of ${sym} @ \$${px.toFixed(2)}. Pre-trade risk passed. Press [ENTER] to confirm & sign with your authorized key.`;
