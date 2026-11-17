@@ -3,6 +3,18 @@
 Tracks the readiness gap items (P1–P23) from the readiness plan. One row per
 item; branches are in this repo. Update per item after its report is written.
 
+## External audit 2026-11-17b — remediated (ca7d4fb)
+
+12 findings; 11 fixed with regression tests in `test/audit-2026-11-17b.test.js`
+(plus owner-suite regressions for C-01 and H-02). **L-01 stale**: the peg feed
+already aggregates CoinGecko + Coinbase with agreement logic (readiness P14,
+commit 383005b) — the audit ran against an older tree. C-01 escrow rehydration,
+H-01 Binance consent gate, H-02 policy-name containment, H-03 honest simulation
+labels, H-04 durable HLP lockup, M-01 durable turnover cap, M-02 wired blotter,
+M-03 atomic keystore writes, M-04 Anthropic tool_result protocol, M-05
+symbol-scoped kill switch, L-02 short value flags. Full chain green.
+
+
 | Item | Title | Status | Branch | Notes |
 |------|-------|--------|--------|-------|
 | P1 | Capability registry + live gate | DONE | `main` (22ef18f) | `src/capabilities/registry.ts`, `assertLiveAllowed()` on signing paths |
