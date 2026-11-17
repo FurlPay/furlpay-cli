@@ -24,13 +24,14 @@ The CLI's security posture rests on one architectural decision — **identity an
 | Stolen web session cookie | Scope decoupling — cookie is read-only; no signing keys exist server-side |
 | Info-stealer malware | OS-bound sealing (DPAPI / `0600` POSIX); secrets never in plaintext, never in argv, echo suppressed on interactive input |
 | Key in shell history | Argv rejection — secrets via stdin or environment only |
-| AI prompt injection ("trade $100k") | Layered mandate: OS-file-locked caps (single-tx + daily) evaluated atomically; `requiresUserInteraction` forces human `[y/N]`; no policy = refusal |
+| AI prompt injection ("trade $100k") | Read-only MCP default — value-moving tools are structurally absent from tools/list and refused with `EXECUTION_MODE_REQUIRED`; execution mode adds two-phase preview→confirm (hash-bound, single-use, policy re-run on the STORED amount); OS-file-locked caps (single-tx + daily) evaluated atomically; `requiresUserInteraction` forces human `[y/N]` |
 | Compromised exchange API key | Structural absence of withdrawal methods + your Binance-side withdrawal disable + IP binding |
 | Adverse slippage / MEV | Pre-trade guardrails; orders >15% from mid rejected as fat-finger; per-side slippage caps with absolute-deviation math; 50 bps default market buffer |
 | Credential exfiltration via `--api-base` | Cookie only attaches to `furlpay.com` over TLS or loopback; other targets go credential-less, loudly |
 | Payment replay | Persistent nonce ledger + stable idempotency keys; unknown outcomes are never retried under a new key |
 | Escrow proof forgery | ECDSA seller-signature verification, spec-hash equality, ledger-clock timestamps |
 | Backdated auto-release | `submittedAt` from caller input is discarded — ledger clock only |
+| Compromised or diverging price source | Oracle aggregator gates on cross-source agreement (±1–3% per asset): a disagreement returns per-source readings with a **null price** — never a blended number; sanity bands drop out-of-band prints; the Pyth provider is inactive unless an operator configures a gateway + verified feed IDs, and rejects stale publishes
 
 ## Money-math integrity
 

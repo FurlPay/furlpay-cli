@@ -1,30 +1,51 @@
 # FurlPay CLI
 
-> High-performance terminal execution layer for Stellar tokenized RWAs and SDEX/Soroban trading, Hyperliquid L1 perpetuals (live signed execution), Binance spot (testnet-ready), Bitcoin fork asset operations, market microstructure analytics, x402 micropayments, escrow settlement and an MCP agent server. Honesty-first: every surface is labeled LIVE, SIMULATED or NOT IMPLEMENTED at runtime.
+> Terminal execution layer for Stellar tokenized RWAs and SDEX/Soroban trade tooling, Hyperliquid L1 perpetuals (live signed execution), Binance spot (testnet-ready), live multi-source oracle quotes, a read-only Solana RPC surface, Bitcoin fork asset operations, market microstructure analytics, x402 micropayment tooling, a fail-closed local finance ledger, ETSS escrow and an MCP agent server. Honesty-first: every surface is labeled LIVE, SIMULATED or NOT IMPLEMENTED at runtime.
 
 ## Install
 
 - `npm install -g @furlpay/cli` — Node.js ≥ 22.19.0
 - `furlpay --version`, `furlpay doctor`, `furlpay update`
 
-## MCP tools (25)
+## MCP server (35 tools — READ-ONLY by default)
+
+A fresh `furlpay mcp` cannot move funds: the 8 value-moving tools below are
+structurally ABSENT from tools/list and refused at the dispatcher until the
+operator starts with `--enable-execution` AND has a configured agent policy.
+Even in execution mode, mutating calls require the two-phase protocol:
+`furlpay_preview_execution` (binds args to a one-time hash + net effect) →
+`furlpay_confirm_execution` (single-use, 10-minute TTL, policy gate re-run on
+the STORED amount).
+
+Execution tools (hidden by default, two-phase gated when enabled):
 
 - `furlpay_settle_invoice`: settle HTTP 402 challenges (SIMULATED in this build)
 - `furlpay_trade`: limit/path/AMM orders on Stellar with delegated budget enforcement
 - `furlpay_trade_perp`: Hyperliquid L1 perpetual orders — LIVE signed execution
+- `furlpay_execute_trade` / `furlpay_cancel_order` / `furlpay_emergency_stop`: order lifecycle
+- `furlpay_pay`: platform A2A payment
+- `furlpay_sweep_treasury`: idle-USDC sweep (HLP real signed; FOBXX simulated)
+
+Read-only tools (always available):
+
+- `furlpay_oracle_price`: live multi-source USD quote (Coinbase/Kraken/Binance/Jupiter), median + cross-source agreement gate — DISAGREEMENT/UNAVAILABLE carry a null price, never a blend or a guess
+- `furlpay_solana_cluster_status`: live Solana RPC reads (epoch/slot/block height); no signing path exists
 - `furlpay_get_hlp_yield`: live HLP vault equity/APY/PnL; unreported fields → null
 - `furlpay_balance`: balances (simulated sample in unauthenticated mode)
 - `furlpay_get_quote`: multi-hop SDEX/Soroban quotes
-- `furlpay_sweep_treasury`: idle-USDC sweep (HLP real signed; FOBXX simulated)
-- `fork_list_networks`: declared 2026 fork networks (BTCB2, BTC1, ECX)
-- `fork_inspect_network`: full fork profile — snapshot blocks, replay protocol
-- `fork_replay_check`: offline replay-risk audit of a pre-fork BTC address
-- `microstructure_analytics`: OBI + Stoikov microprice over a supplied depth snapshot
-- `microstructure_vpin`: Easley/López de Prado/O'Hara flow toxicity over a supplied tape
-- `microstructure_quotes`: Avellaneda-Stoikov reservation price + optimal quotes
+- `furlpay_list_chains` / `furlpay_list_exchanges` / `furlpay_market_search`: venue discovery
+- `furlpay_get_market_data` / `furlpay_get_orderbook` / `furlpay_get_funding` / `furlpay_get_market_analysis` / `furlpay_compare_markets`: market data
+- `furlpay_positions` / `furlpay_open_orders` / `furlpay_portfolio_risk` / `furlpay_preview_trade`: account views (preview executes nothing)
+- `furlpay_get_rwa_assets` / `furlpay_get_rwa_quote`: tokenized securities catalog (SEP-8 never claimed)
+- `furlpay_finance_overview` / `furlpay_finance_ledger` / `furlpay_finance_spend` / `furlpay_finance_treasury` / `furlpay_finance_billing` / `furlpay_finance_payments`: read-only views of the local double-entry finance ledger — MCP can inspect money, never authorize its movement
+- `furlpay_preview_execution` / `furlpay_confirm_execution`: the two-phase protocol itself
 
 ## Key CLI commands
 
+- `furlpay oracle price SOL` — live multi-source USD quote with agreement gate; `oracle sources` lists endpoints
+- `furlpay solana status` / `solana balance <addr>` — live RPC reads (read-only)
+- `furlpay solana price <mint|alias>` / `solana quote <in> <out> <raw-amount>` — Jupiter price + INDICATIVE route (nothing in this build can fill it)
+- `furlpay finance init|status|ledger|spend|approval|payment|treasury|billing` — local financial operations (double-entry ledger, spend controls, approvals)
 - `furlpay hyperliquid trade --symbol BTC --side sell --size 0.05 --leverage 5` — LIVE signed short
 - `furlpay short mechanisms` — shorting venue registry with honest status
 - `furlpay short signal --book depth.json --tape trades.json --bucket 1000` — OBI/microprice/VPIN short-readiness check (read-only)
@@ -36,21 +57,25 @@
 
 ## Honesty matrix (summary)
 
-- LIVE: Hyperliquid market data + perp execution, HLP vault stats + transfers, tx verify (lookup), faucet (testnet), doctor
-- SIMULATED: x402 settlement, Stellar SDEX/Soroban order flow, SEP-8 KYC, FOBXX sweep
-- IMPLEMENTED (offline/testnet-blocked): Binance spot adapter, fork registry + replay audit + slippage simulator + sweep artifacts, microstructure analytics, shorting signals
-- NOT IMPLEMENTED (refuses with NOT_IMPLEMENTED): fork market/plan/liquidate/settlement, Binance futures/OCO/websockets/withdrawals
+- LIVE: Hyperliquid market data + perp execution, HLP vault stats + transfers, oracle quotes (read-only), Solana RPC reads (read-only), tx verify (lookup), faucet (testnet), doctor, USDC peg guardrail (feed ingestion)
+- SIMULATED: x402 settlement, Stellar SDEX/Soroban order flow, SEP-8 KYC, FOBXX sweep, MCP balances (unauthenticated)
+- IMPLEMENTED (offline/testnet-blocked): Binance spot adapter, fork registry + replay audit + slippage simulator + sweep artifacts, microstructure analytics, shorting signals, streaming engine state machines, quantitative algo engines (plans/verdicts only)
+- LOCAL LEDGER: escrow (ETSS state machine), finance ledger
+- NOT IMPLEMENTED (refuses with NOT_IMPLEMENTED): fork market/plan/liquidate/settlement, Binance futures/OCO/websockets/withdrawals, Solana signing/broadcast (surface is read-only)
 
 ## Security invariants
 
+- A fresh `furlpay mcp` cannot move funds (read-only default, structural absence)
 - Withdrawals are structurally absent from the Binance adapter surface
 - Agent Trust mandate gate runs BEFORE any request is signed
 - Private keys: environment/stdin only, never argv, never logs
 - Integer-minor (BigInt) financial arithmetic everywhere; no floats on money paths
+- Oracle disagreements return a null price — never a blended number; unverified Pyth feed ids never ship baked in
 - Every non-live surface is labeled at runtime — nothing fabricated
 
 ## Docs
 
+- docs-site (https://furlpay.github.io/furlpay-cli/) — full documentation: getting started, reference, honesty matrix, security model
 - docs/BINANCE.md — Binance adapter setup, security boundary, verification status
 - docs/SHORTING.md — Bitcoin shorting execution + signal research
 - docs/FORKS.md — fork asset operations, replay auditing, sweep artifacts

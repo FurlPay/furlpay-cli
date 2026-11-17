@@ -510,29 +510,47 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 }
 ```
 
-### Exposed MCP Tools (35 total — read-only research + policy-gated execution):
+### Exposed MCP Tools (two surfaces — read-only research + policy-gated execution):
 
-**Fork asset operations (read-only):**
+`furlpay mcp --wallet <name>` serves the **TypeScript execution server**
+(`src/mcp/server.ts`, 35 tools). Plain `furlpay mcp` serves the **JS research
+server** (`lib/mcp.js`, 29 tools). On BOTH servers a default install cannot
+move funds: every value-moving tool is structurally ABSENT from tools/list
+until `--enable-execution` AND a configured agent policy — and in execution
+mode mutating calls still require the two-phase protocol
+(`furlpay_preview_execution` → hash-bound single-use `furlpay_confirm_execution`).
+
+**JS research server — fork asset operations (read-only):**
 - `fork_list_networks` / `fork_inspect_network` / `fork_replay_check`: declared fork registry and offline replay-risk audits (BTCB2, BTC1, ECX).
 
-**Market microstructure (read-only quant research):**
+**JS research server — market microstructure (read-only quant research):**
 - `microstructure_analytics`: exponentially-weighted OBI + Stoikov microprice over a supplied depth snapshot (integer-minor).
 - `microstructure_vpin`: Easley/López de Prado/O'Hara order-flow toxicity over a supplied trade tape (fixed-volume buckets, trailing partial excluded per the model).
 - `microstructure_quotes`: Avellaneda-Stoikov reservation price + optimal bid/ask for an inventory position.
 
-**Quantitative algo engines (read-only research — HFT-V2 report §4/§7/§9):**
+**JS research server — quantitative algo engines (read-only research — HFT-V2 report §4/§7/§9):**
 - `algo_glft_quotes`: Guéant–Lehalle–Fernandez-Tapia closed-form quotes — total spread δa+δb = γσ²τ + (2/γ)ln(1+γ/k) around the inventory-skewed reservation, with GLFT fill probability e^(−kδ). The deployable quoting frontier per the 2026 literature; adds the ½γσ²τ vol term the AS variant omits.
 - `algo_breakeven`: maker ship/no-ship arithmetic — E[PnL/h] = λ(δ − a − c) − ½γσ²q² in bps. Verdicts follow the sign of the arithmetic, never optimism.
 - `algo_cascade`: liquidation-cascade regime composite (funding spike + ask-wall OBI + toxic VPIN). Analysis only — the response itself carries the correction that undiscounted-book liquidations leave no sniping edge (HFT-V2 §5).
 
-**Policy-gated execution:**
+**TS execution server — policy-gated execution (hidden by default, two-phase when enabled):**
 - `furlpay_settle_invoice`: Settle x402 payment challenges with Agent Trust Engine policy checks (OFAC/SDN check, velocity limit, spend caps). Responses are explicitly labeled `SIMULATED` / `LOCAL_SIMULATION` in this build.
 - `furlpay_sweep_treasury`: Detect idle USDC and sweep into Franklin Templeton FOBXX (Benji) yield on Soroban (labeled simulated) or Hyperliquid HLP (real signed vault transfer).
 - `furlpay_trade`: Execute limit orders, path payments, or AMM swaps with delegated budget enforcement on Stellar.
 - `furlpay_trade_perp`: Execute perpetual futures orders on Hyperliquid L1 (BTC-PERP, ETH-PERP, NVDA-PERP, HYPE-PERP).
+- `furlpay_execute_trade` / `furlpay_cancel_order` / `furlpay_emergency_stop` / `furlpay_pay`: order lifecycle and A2A payment — same gating.
+
+**TS execution server — read-only (always available):**
 - `furlpay_get_hlp_yield`: Query live HLP vault performance — equity/APY/PnL derived from the live `/info` response; unreported fields (share price, position count) are returned as `null` rather than fabricated.
 - `furlpay_balance`: Query balances across Stellar native assets, USDC, and tokenized RWAs (labeled simulated sample data in unauthenticated mode).
 - `furlpay_get_quote`: Retrieve optimal multi-hop quotes across SDEX and Soroban AMMs.
+- `furlpay_get_market_data` / `furlpay_get_orderbook` / `furlpay_get_funding` / `furlpay_get_market_analysis` / `furlpay_compare_markets` / `furlpay_market_search` / `furlpay_list_chains` / `furlpay_list_exchanges`: market data and venue discovery.
+- `furlpay_positions` / `furlpay_open_orders` / `furlpay_portfolio_risk` / `furlpay_preview_trade`: account views (preview executes nothing).
+- `furlpay_get_rwa_assets` / `furlpay_get_rwa_quote`: tokenized securities catalog (SEP-8 never claimed).
+- `furlpay_finance_overview` / `furlpay_finance_ledger` / `furlpay_finance_spend` / `furlpay_finance_treasury` / `furlpay_finance_billing` / `furlpay_finance_payments`: read-only views of the local double-entry finance ledger — MCP can inspect money, never authorize its movement.
+- `furlpay_oracle_price`: live multi-source USD quote (Coinbase/Kraken/Binance/Jupiter) with a cross-source agreement gate — DISAGREEMENT returns per-source readings with a **null price**, never a blended number.
+- `furlpay_solana_cluster_status`: live Solana RPC reads (epoch/slot/block height). No signing path exists on this surface.
+- `furlpay_preview_execution` / `furlpay_confirm_execution`: the two-phase protocol itself.
 
 ---
 
