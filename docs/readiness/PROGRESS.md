@@ -11,7 +11,7 @@ item; branches are in this repo. Update per item after its report is written.
 | P4 | Order lifecycle correctness | PENDING | — | not started |
 | P5 | Risk engine & kill-switch | PENDING | — | risk engine was hardened 2026-11-17 (e3462a6) but breaker/kill-switch independence not done |
 | P6 | Agent Trust mandate state | PENDING | — | not started |
-| P7 | MCP defaults & human-in-the-loop | IN PROGRESS | `readiness/p23-orchestrator-hardening` | finance surface already inspection-only (pinned by test); full read-only default + two-phase execution open |
+| P7 | MCP defaults & human-in-the-loop | DONE | `readiness/p23-orchestrator-hardening` | read-only default (structural absence), two-phase preview→confirm, sanitizer + injection suite, per-call audit + rate limits; see report below |
 | P8 | Live-network test strategy | PARTIAL | `main` | differential/property coverage exists in spots; chaos harness + coverage gates open |
 | P9 | Stellar live execution (decision gate) | PENDING | — | safe relabel tasks open |
 | P10 | x402 custody decision | PENDING | — | decision doc not written |
@@ -92,3 +92,53 @@ store). Windows path in the race worker uses OneDrive-adjacent temp dirs —
 fine for tests, P15 will move state off synced folders. Real chain-verified
 evidence still needs an injected RPC provider (interface ready, no live
 provider wired).
+
+## P7 report (2026-11-17)
+
+**Status: DONE** on `readiness/p23-orchestrator-hardening`.
+
+**What I found.** Both MCP surfaces registered value-moving tools by default
+(32 tools on the TS surface; `send_stablecoin`, `earn_withdraw`,
+`place_order`, `book_travel` etc. on the JS `lib/mcp.js` surface), gated only
+at CALL time by the agent-policy ledger. A policy-gate refusal is strong, but
+the tools were still advertised and a direct call errored at a layer the
+model could keep probing. `swap_tokens`, `earn_withdraw` and
+`set_card_controls` also lacked the annotations their siblings carried.
+
+**What changed.**
+- `src/mcp/server.ts` — `mode` ("read-only" DEFAULT | "execution"); `EXECUTION_TOOLS`
+  structurally filtered out of tools/list in read-only mode and refused at the
+  dispatcher (`EXECUTION_MODE_REQUIRED`); two-phase protocol
+  (`furlpay_preview_execution` → hash-bound single-use `furlpay_confirm_execution`,
+  TTL 10 min, policy gate re-run on STORED amount); per-call audit JSONL with
+  args hash only (raw untrusted args never enter the log); rolling-minute
+  mutating rate limit (attempts count even when refused); startup mode banner
+  on stderr; injectable audit path and AgentKeyService for tests.
+- `src/mcp/sanitize.ts` (new) — control-char/ANSI stripping, length caps,
+  defensive numeric parsing, canonical args hash.
+- `src/cli.ts` — `furlpay mcp` parses `--enable-execution`; execution mode
+  refuses to start (exit 47) without a configured agent policy.
+- `lib/mcp.js` — same structural default for the JS surface (tools/list
+  filter + dispatcher backstop + startup policy gate + mode banner).
+- `lib/util.js` — `--enable-execution` registered as a boolean flag.
+- `server.json` — description now states the read-only default and what
+  execution mode requires.
+- Legacy honesty tests (stellar.test.js MCP block, mcp-2026.test.js) updated
+  to the two-phase contract — the SIMULATED/null-APY assertions all survive,
+  now reached via preview→confirm.
+
+**Tests.** `test/mcp-hardening.test.js` (18 cases incl. a spawn-level E2E:
+default `furlpay mcp` tools/list has no value-moving tool; a guessed
+`send_stablecoin` call errors `EXECUTION_MODE_REQUIRED`); injection fixtures
+run in CI via the registered chain (`npm test`).
+
+**Acceptance.** A fresh `furlpay mcp` can't place an order or move funds —
+proven at the process level. No tool named or aliased approve/withdraw-auth
+is registered by default. Injection suite runs in CI.
+
+**Residual.** `furlpay_settle_invoice` remains a single tool that executes at
+confirm (policy-gated; simulation-only without a policy) — per-call two-phase
+splits are already the protocol; finer per-venue preview plumbing is polish.
+Per-agent revoke exists in the agent-key ledger (revoke = delete/expire the
+policy file; a revoked policy fails the startup and per-call gates).
+

@@ -1230,7 +1230,21 @@ export class FurlPayStellarCli {
 
   private async handleMcp(args: string[], flags: Record<string, any>): Promise<void> {
     const wallet = flags.wallet || "default-agent";
-    const server = new McpStdioServer(wallet);
+    // P7 DEFAULTS: read-only unless execution is EXPLICITLY enabled — and
+    // execution mode additionally requires an already-configured agent
+    // policy for the named wallet. A fresh install cannot move funds.
+    const wantsExecution =
+      flags["enable-execution"] === true || flags.mode === "execution" || flags["allow-execution"] === true;
+    const server = new McpStdioServer(wallet, { mode: wantsExecution ? "execution" : "read-only" });
+    if (wantsExecution) {
+      if (!server.hasAgentPolicy()) {
+        console.error(`[!] Execution mode refused: no agent policy named "${wallet}" is configured.`);
+        console.error(`    Create one first: furlpay wallet agent-keygen --name ${wallet}`);
+        console.error(`    A policy file is the spend-cap authority for execution mode — no policy, no execution.`);
+        process.exitCode = 47;
+        return;
+      }
+    }
     server.startStdio();
   }
 

@@ -284,28 +284,74 @@ test("FurlPay Stellar: HTTP 402 Micropayment Engine & TigerBeetle Netting", asyn
   assert.ok(settled.authorizationHeader.startsWith("Authorization: x402"));
 });
 
-test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async () => {
-  const mcp = new McpStdioServer();
+test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls (P7 two-phase)", async () => {
+  // DEFAULT surface: READ-ONLY. Execution tools are structurally absent —
+  // a fresh `furlpay mcp` cannot place an order or move funds (P7).
+  const mcp = new McpStdioServer("default-agent");
   const tools = mcp.getToolDefinitions();
-  assert.ok(tools.length >= 7, "Should register core trading and settlement MCP tools");
   const toolNames = tools.map((t) => t.name);
-  assert.ok(toolNames.includes("furlpay_settle_invoice"));
-  assert.ok(toolNames.includes("furlpay_sweep_treasury"));
-  assert.ok(toolNames.includes("furlpay_trade"));
-  assert.ok(toolNames.includes("furlpay_trade_perp"));
   assert.ok(toolNames.includes("furlpay_get_hlp_yield"));
   assert.ok(toolNames.includes("furlpay_balance"));
   assert.ok(toolNames.includes("furlpay_get_quote"));
+  for (const t of ["furlpay_settle_invoice", "furlpay_sweep_treasury", "furlpay_trade", "furlpay_trade_perp"]) {
+    assert.ok(!toolNames.includes(t), `${t} must be absent from the default read-only tool list`);
+  }
 
-  // Call furlpay_settle_invoice
-  const invoiceRes = await mcp.handleCall("furlpay_settle_invoice", {
-    challengeHeader: 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"',
+  // A guessed mutating call is refused at the dispatcher — structural
+  // default, not just a hidden listing.
+  await assert.rejects(
+    async () => {
+      await mcp.handleCall("furlpay_settle_invoice", {
+        challengeHeader: 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"',
+      });
+    },
+    { message: /EXECUTION_MODE_REQUIRED/ }
+  );
+
+  // EXECUTION surface: explicit mode + a REAL configured agent policy,
+  // injected from a temp dir (the same sealed-policy service the CLI uses).
+  const execDir = require("fs").mkdtempSync(require("path").join(require("os").tmpdir(), "stellar-mcp-p7-"));
+  const svc = new AgentKeyService(execDir);
+  svc.generateAgentKey({ name: "p7-agent", dailyLimit: 5000, allowedAssets: ["USDC"], singleTxCap: 5000 });
+  const exec = new McpStdioServer("p7-agent", { mode: "execution", agentKeyService: svc });
+
+  // Direct dispatch of a mutating tool: refused even in execution mode —
+  // two-phase (preview → confirm) is the ONLY path to value movement.
+  await assert.rejects(
+    async () => {
+      await exec.handleCall("furlpay_settle_invoice", {
+        challengeHeader: 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"',
+      });
+    },
+    { message: /TWO_PHASE_REQUIRED/ }
+  );
+
+  // Preview binds sanitized args to a one-time hash; confirm executes the
+  // STORED args. The honesty assertions below are unchanged — they now sit
+  // behind the two-phase protocol.
+  const invoicePreview = await exec.handleCall("furlpay_preview_execution", {
+    tool: "furlpay_settle_invoice",
+    args: { challengeHeader: 'WWW-Authenticate: x402 recipient="GBLX99API", amount="0.0005", token="USDC"' },
   });
+  assert.match(invoicePreview.executionHash, /^0x[0-9a-f]{64}$/);
+  assert.ok(invoicePreview.note.includes("Nothing executed"), "preview moves nothing");
+  const invoiceRes = await exec.handleCall("furlpay_confirm_execution", { executionHash: invoicePreview.executionHash });
   assert.strictEqual(invoiceRes.status, "SIMULATED", "settlement is local simulation only");
   assert.strictEqual(invoiceRes.settlement_type, "LOCAL_SIMULATION");
+  // Single-use: the consumed preview cannot be replayed.
+  await assert.rejects(
+    async () => {
+      await exec.handleCall("furlpay_confirm_execution", { executionHash: invoicePreview.executionHash });
+    },
+    { message: /CONFIRM_WITHOUT_PREVIEW/ }
+  );
 
   // Call furlpay_sweep_treasury with FOBXX (Stellar Benji regulated yield)
-  const fobxxSweep = await mcp.handleCall("furlpay_sweep_treasury", { amountUsd: 1000.0, target: "FOBXX" });
+  const sweepPreview = await exec.handleCall("furlpay_preview_execution", {
+    tool: "furlpay_sweep_treasury",
+    args: { amountUsd: 1000.0, target: "FOBXX" },
+  });
+  const fobxxSweep = await exec.handleCall("furlpay_confirm_execution", { executionHash: sweepPreview.executionHash });
   assert.strictEqual(fobxxSweep.status, "SIMULATED", "FOBXX sweep has no live contract call — must be labeled simulated");
   assert.strictEqual(fobxxSweep.simulated, true);
   assert.strictEqual(fobxxSweep.vault, "STELLAR_FOBXX_BENJI");
@@ -314,26 +360,29 @@ test("FurlPay Stellar: Model Context Protocol (MCP) Server Tool Calls", async ()
   assert.strictEqual(fobxxSweep.apy, null);
   assert.ok(fobxxSweep.apy_note.includes("no issuer data source"));
 
-  // Mutating tool with NO agent policy configured must strictly fail closed
-  // (audit P1): the policy gate fires before any signer check — an
-  // unconfigured MCP server never moves value.
+  // HLP sweep is a REAL signed vault transfer: without a live signer it
+  // fails closed at the venue layer (policy passes — the signer does not).
+  const hlpPreview = await exec.handleCall("furlpay_preview_execution", {
+    tool: "furlpay_sweep_treasury",
+    args: { amountUsd: 1000.0, target: "HLP" },
+  });
   await assert.rejects(
     async () => {
-      await mcp.handleCall("furlpay_sweep_treasury", { amountUsd: 1000.0, target: "HLP" });
+      await exec.handleCall("furlpay_confirm_execution", { executionHash: hlpPreview.executionHash });
     },
-    { message: /Autonomous execution refused: no agent policy/ }
+    (e) => /No signer configured|Mutation rejected|Autonomous execution refused/.test(e.message)
   );
 
+  // Perp execution under two-phase still fails closed without configured keys.
+  const perpPreview = await exec.handleCall("furlpay_preview_execution", {
+    tool: "furlpay_trade_perp",
+    args: { symbol: "BTC-PERP", side: "buy", size: 1, leverage: 5 },
+  });
   await assert.rejects(
     async () => {
-      await mcp.handleCall("furlpay_trade_perp", {
-        symbol: "BTC-PERP",
-        side: "buy",
-        size: 1,
-        leverage: 5,
-      });
+      await exec.handleCall("furlpay_confirm_execution", { executionHash: perpPreview.executionHash });
     },
-    { message: /Autonomous execution refused: no agent policy/ }
+    (e) => /Mutation rejected|No signer|not configured|Autonomous execution refused/.test(e.message)
   );
 
   // Call furlpay_get_hlp_yield

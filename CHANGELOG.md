@@ -8,6 +8,37 @@ releases; patch releases are always safe to take.
 
 ## Unreleased
 
+Readiness P7 — MCP defaults & human-in-the-loop.
+
+### Security
+
+- **A fresh `furlpay mcp` cannot move funds.** The server now defaults to
+  READ-ONLY mode: every value-moving tool (settle invoice, treasury sweep,
+  trades, perps, cancels, payments) is structurally ABSENT from tools/list
+  and refused by the dispatcher. Execution requires `--enable-execution`
+  (or `--mode execution`) AND an already-configured agent policy file — the
+  policy is refused at startup otherwise, before any tool call is possible.
+- **Two-phase execution.** Mutating tools can no longer be called directly
+  even in execution mode (`TWO_PHASE_REQUIRED`). `furlpay_preview_execution`
+  binds sanitized arguments to a one-time hash and shows the net effect;
+  `furlpay_confirm_execution` is the only path that executes — single-use,
+  10-minute TTL, re-running the agent policy gate on the STORED amount, so a
+  confirm call can never smuggle a bigger number past the spend caps.
+- **Untrusted-data sanitizer + injection eval suite.** Venue strings, asset
+  names, memos and x402 headers are data: control characters and ANSI
+  escapes stripped, length-capped, and hash-bound before any downstream use.
+  An adversarial fixture suite (prompt-injection payloads in tool names,
+  arguments and memos; proto-pollution; rate-limit hammering) runs in CI.
+- **Per-call audit trail.** Every MCP call — allowed or refused — appends an
+  audit line (agent identity, mode, tool, args HASH, verdict) to
+  `~/.furlpay/mcp-audit.jsonl`; raw untrusted arguments never enter the log.
+  Mutating calls are rate-limited (30/min rolling default) and attempts
+  count even when the policy gate refuses them.
+- `lib/mcp.js` JS surface gets the same structural default: mutating tools
+  hidden from tools/list, dispatcher backstop, startup policy check.
+  `swap_tokens`, `earn_withdraw` and `set_card_controls` now carry the same
+  honest annotations the other mutating tools had.
+
 Remediation of the 2026-11-17 external audit verification (gap-closure branch).
 
 ### Security

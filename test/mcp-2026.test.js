@@ -49,10 +49,12 @@ test("MCP 2026 Specification: Read-only tools do not mandate human interaction",
 });
 
 test("MCP 2026 Specification: TypeScript McpStdioServer enforces requiresUserInteraction", () => {
+  // P7: the DEFAULT server is read-only — sensitive tools are structurally
+  // ABSENT, not merely annotated. They exist only in an explicit
+  // execution-mode server, where they keep the interaction mandate.
   const server = new McpStdioServer("test-agent");
-  const toolDefs = server.getToolDefinitions();
-
-  assert(toolDefs.length >= 18, `Server must expose at least 18 tools, got ${toolDefs.length}`);
+  const defaultNames = server.getToolDefinitions().map((t) => t.name);
+  assert(defaultNames.length >= 18, `Server must expose at least 18 tools, got ${defaultNames.length}`);
 
   const sensitiveTools = [
     "furlpay_trade",
@@ -62,10 +64,16 @@ test("MCP 2026 Specification: TypeScript McpStdioServer enforces requiresUserInt
     "furlpay_emergency_stop",
     "furlpay_pay",
   ];
-
   for (const name of sensitiveTools) {
-    const def = toolDefs.find((t) => t.name === name);
-    assert(def, `Tool ${name} must be registered in McpStdioServer`);
+    assert(!defaultNames.includes(name), `Tool ${name} must be ABSENT from the default read-only server (P7)`);
+  }
+
+  // Execution mode: the tools exist and still mandate human interaction.
+  const execServer = new McpStdioServer("test-agent", { mode: "execution" });
+  const execDefs = execServer.getToolDefinitions();
+  for (const name of sensitiveTools) {
+    const def = execDefs.find((t) => t.name === name);
+    assert(def, `Tool ${name} must be registered in an execution-mode McpStdioServer`);
     assert.strictEqual(
       def._meta?.["anthropic/requiresUserInteraction"],
       true,
