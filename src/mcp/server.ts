@@ -23,6 +23,7 @@ import { MarketDiscoveryService } from "../market/discovery";
 import { MarketDataService } from "../services/market-data";
 import { HyperliquidRiskEngine } from "../hyperliquid/risk-engine";
 import { HyperliquidClient } from "../hyperliquid/client";
+import { FinanceManager } from "../finance/manager";
 
 export class McpStdioServer {
   private agentName: string;
@@ -36,6 +37,16 @@ export class McpStdioServer {
   private marketData: MarketDataService;
   private riskEngine: HyperliquidRiskEngine;
   private hlClient: HyperliquidClient;
+  /** Lazy: `furlpay mcp` startup must not depend on finance-store health. */
+  private financeInstance?: FinanceManager;
+
+  /** Read-only finance surface. Deliberately no create/approve/limit tools —
+   *  MCP can inspect money, never authorize its movement (that is the
+   *  CLI human's job via `furlpay finance approval approve`). */
+  private getFinance(): FinanceManager {
+    if (!this.financeInstance) this.financeInstance = new FinanceManager();
+    return this.financeInstance;
+  }
 
   constructor(agentName: string = "default-agent") {
     this.agentName = agentName;
@@ -351,6 +362,60 @@ export class McpStdioServer {
           required: ["asset", "amount"],
         },
       },
+
+      // 9. Financial Operations Layer (READ-ONLY — inspection, never authorization)
+      {
+        name: "furlpay_finance_overview",
+        description: "Read-only overview of the local financial operations layer: accounts, spend limits, settlement capabilities. MCP cannot move money or approve payments.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "furlpay_finance_ledger",
+        description: "Read-only ledger view: recent double-entry transactions, or a full reconciliation report (balanced count, chain integrity).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            reconcile: { type: "boolean", description: "Run reconciliation instead of listing" },
+            limit: { type: "number", description: "Max transactions to list (default 10)" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_spend",
+        description: "Read-only spend report: window usage against limits, breakdown by unit, recent consuming transactions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            unit: { type: "string", description: "Filter to one unit, e.g. USDC" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_treasury",
+        description: "Read-only treasury balances (available vs reserved) and inflow/outflow by unit, derived from the ledger.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "furlpay_finance_billing",
+        description: "Read-only billing summary: payment volume in/out, fees by unit, state counts. Fees are reported separately from volume.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sinceIso: { type: "string", description: "Optional ISO timestamp window start" },
+          },
+        },
+      },
+      {
+        name: "furlpay_finance_payments",
+        description: "Read-only payment history from the ledger. States are the ledger's own (submission is never settlement).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "Max payments (default 10)" },
+            inspect: { type: "string", description: "Inspect one payment by ledger tx id" },
+          },
+        },
+      },
     ];
   }
 
@@ -551,6 +616,76 @@ export class McpStdioServer {
 
       case "furlpay_get_quote": {
         return await this.router.findBestRoute(args.sourceAsset, args.targetAsset, args.amount);
+      }
+
+      // ── Financial Operations Layer: READ-ONLY by design ─────────────────
+      // No finance tool here can create payments, approve requests, or change
+      // limits. Money movement authorization is a human CLI action; an MCP
+      // agent can read the same ledger the human audits, nothing more.
+      case "furlpay_finance_overview": {
+        const fin = this.getFinance();
+        return {
+          readOnlyNotice: "MCP finance tools are inspection-only; payments, approvals and limit changes happen in the CLI by a human.",
+          accounts: fin.ledger.listAccounts().map((a) => ({ id: a.id, kind: a.kind, unit: a.unit, network: a.network ?? null, role: a.role ?? null })),
+          spendLimits: Object.fromEntries(Object.entries(fin.spend.getLimits()).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])),
+          settlementCapabilities: fin.payments.settlementCapabilities(),
+        };
+      }
+      case "furlpay_finance_ledger": {
+        const fin = this.getFinance();
+        if (args.reconcile === true) return fin.ledger.reconcile();
+        return {
+          transactions: fin.ledger
+            .listTransactions()
+            .slice(-(args.limit ?? 10))
+            .reverse()
+            .map((t) => ({
+              id: t.id, seq: t.seq, type: t.type, state: t.state,
+                  entries: t.entries.map((e) => ({ account: e.accountId, direction: e.direction, minor: e.minor.toString(), unit: e.unit })),
+                  txHash: t.txHash ?? null, createdAt: t.createdAt,
+            })),
+        };
+      }
+      case "furlpay_finance_spend": {
+        const fin = this.getFinance();
+        const unit = args.unit ?? "USDC";
+        const u = fin.spend.usage(unit);
+        return {
+          unit,
+          usage: { total: u.total.toString(), today: u.today.toString(), thisWeek: u.thisWeek.toString(), thisMonth: u.thisMonth.toString() },
+          limits: Object.fromEntries(Object.entries(u.limits).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])),
+          breakdown: fin.spend.breakdown().map((b) => ({ unit: b.unit, minor: b.minor.toString(), transactions: b.transactions })),
+        };
+      }
+      case "furlpay_finance_treasury": {
+        const fin = this.getFinance();
+        const s = fin.treasury.status();
+        return {
+          balances: s.balances.map((b) => ({ ...b, availableMinor: b.availableMinor.toString(), reservedMinor: b.reservedMinor.toString(), totalMinor: b.totalMinor.toString() })),
+          inflowMinorByUnit: Object.fromEntries(Object.entries(s.inflowMinorByUnit).map(([k, v]) => [k, v.toString()])),
+          outflowMinorByUnit: Object.fromEntries(Object.entries(s.outflowMinorByUnit).map(([k, v]) => [k, v.toString()])),
+          note: s.note,
+        };
+      }
+      case "furlpay_finance_billing": {
+        const fin = this.getFinance();
+        const s = fin.billing.summary(args.sinceIso);
+        const b = (o: Record<string, bigint>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v.toString()]));
+        return { volumeOutMinorByUnit: b(s.volumeOutMinorByUnit), volumeInMinorByUnit: b(s.volumeInMinorByUnit), feesMinorByUnit: b(s.feesMinorByUnit), counts: s.counts };
+      }
+      case "furlpay_finance_payments": {
+        const fin = this.getFinance();
+        if (args.inspect) {
+          const p = fin.payments.get(args.inspect);
+          if (!p) throw new Error(`Unknown payment ${args.inspect}.`);
+          return { ...p, amount: { ...p.amount } };
+        }
+        return {
+          payments: fin.payments.history(args.limit ?? 10).map((p) => ({
+            id: p.id, state: p.state, unit: p.amount.unit, minor: p.amount.minor,
+                network: p.amount.network ?? null, destination: p.destination ?? null, txHash: p.txHash ?? null, createdAt: p.createdAt,
+          })),
+        };
       }
 
       case "furlpay_list_chains": {

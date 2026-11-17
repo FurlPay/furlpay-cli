@@ -233,6 +233,7 @@ async function main() {
     case "escrow":
     case "account":
     case "binance":
+    case "finance":
       return getStellarCli().run({ command, subcommand: args[0], args: args.slice(1), flags });
 
     // ---- market microstructure analytics (offline, supplied book) ----------
