@@ -38,6 +38,9 @@ import { requestFunds, isValidStellarAddress, FaucetResult, FaucetNetwork } from
 import { validateConfig } from "./config/validate";
 import { BinanceAdapter } from "./binance/binance.adapter";
 import { DurableEventStore, defaultBlotterPath } from "./blotter/durable-event-store";
+import { OraclePriceAggregator, ASSET_CONFIG } from "./oracles/aggregator";
+import { SolanaRpcClient, assertValidSolanaAddress } from "./solana/rpc";
+import { JupiterClient, KNOWN_MINTS } from "./solana/jupiter";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import * as crypto from "crypto";
 import * as readline from "readline";
@@ -266,6 +269,14 @@ export class FurlPayStellarCli {
 
       case "finance":
         await this.handleFinance(subcommand, args, flags);
+        break;
+
+      case "oracle":
+        await this.handleOracle(subcommand, args, flags);
+        break;
+
+      case "solana":
+        await this.handleSolana(subcommand, args, flags);
         break;
 
       default:
@@ -699,6 +710,222 @@ export class FurlPayStellarCli {
       console.log(`  BUY:  Avg Price \$${estBuy.expectedAvgPrice.toFixed(2)} | Price Impact: +${estBuy.priceImpactPct.toFixed(2)}% | Slippage: \$${estBuy.slippageUsd.toFixed(2)}`);
       console.log(`  SELL: Avg Price \$${estSell.expectedAvgPrice.toFixed(2)} | Price Impact: -${estSell.priceImpactPct.toFixed(2)}% | Slippage: \$${estSell.slippageUsd.toFixed(2)}`);
     }
+  }
+
+  /**
+   * furlpay oracle — live multi-source USD price quotes (gap report Gap 2).
+   * Read-only: fans out to public sources, sanity-bands, medians, and gates
+   * on cross-source agreement. A DISAGREEMENT is printed as exactly that —
+   * never averaged away into a blended number. This command never signs,
+   * places, or broadcasts anything.
+   */
+  private async handleOracle(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = (subcommand || args[0] || "").toLowerCase().trim();
+    const json = flags.output === "json" || flags.json;
+    const aggregator = new OraclePriceAggregator();
+
+    if (sub === "sources" || sub === "status") {
+      const sources = aggregator.describeSources();
+      if (json) {
+        console.log(JSON.stringify({ command: "oracle sources", sources, supportedAssets: Object.keys(ASSET_CONFIG).sort() }, null, 2));
+      } else {
+        console.log("Oracle price sources (public, keyless, https-only):");
+        for (const s of sources) {
+          console.log(`  - ${s.id}`);
+          console.log(`      endpoint: ${s.endpoint}`);
+          console.log(`      assets:   ${s.assets.length ? s.assets.join(", ") : "(none)"}`);
+        }
+        console.log(`Supported assets: ${Object.keys(ASSET_CONFIG).sort().join(", ")}`);
+        console.log(`Optional gateway: Pyth Hermes (FURLPAY_PYTH_HERMES_URL + FURLPAY_PYTH_FEED_IDS) — the public Hermes endpoint is auth-gated (Pyth Pro), so that provider is inactive unless you configure a gateway you are authorized to use.`);
+      }
+      return;
+    }
+
+    let asset: string;
+    if (sub === "price") {
+      asset = (args[0] || flags.asset || "").toUpperCase().trim();
+    } else if (ASSET_CONFIG[sub.toUpperCase()]) {
+      asset = sub.toUpperCase();
+    } else {
+      console.log("Usage: furlpay oracle <price|sources> <ASSET> [--output json]");
+      console.log(`Supported assets: ${Object.keys(ASSET_CONFIG).sort().join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!asset) {
+      console.log("Usage: furlpay oracle price <ASSET> [--output json]");
+      process.exitCode = 1;
+      return;
+    }
+
+    const quote = await aggregator.getQuote(asset);
+    if (json) {
+      console.log(JSON.stringify(quote, null, 2));
+    } else {
+      const bandText = Number.isFinite(quote.sanityBand.maxUsd)
+        ? `$${quote.sanityBand.minUsd} – $${quote.sanityBand.maxUsd}`
+        : `unknown asset (supported: ${Object.keys(ASSET_CONFIG).sort().join(", ")})`;
+      console.log(`Oracle quote — ${quote.asset}/USD (${new Date(quote.fetchedAt).toISOString()})`);
+      console.log(`  Sanity band: ${bandText} | Agreement budget: ±${quote.maxDeviationPct}%`);
+      if (quote.readings.length === 0) {
+        console.log(`  Status: UNAVAILABLE — no source answered with a sane ${quote.asset} price. Nothing is guessed.`);
+      } else {
+        for (let i = 0; i < quote.readings.length; i++) {
+          const r = quote.readings[i];
+          const d = quote.deviations[i]?.deviationPct ?? 0;
+          console.log(`  [${r.source}] $${r.priceUsd} (${d >= 0 ? "+" : ""}${d.toFixed(3)}% vs median)`);
+        }
+        if (quote.status === "LIVE") {
+          const single = quote.readings.length === 1 ? " — SINGLE SOURCE, no cross-check possible" : "";
+          console.log(`  Status: LIVE — median $${quote.priceUsd} across ${quote.readings.length} agreeing source(s)${single}`);
+        } else {
+          console.log(`  Status: DISAGREEMENT — sources disagree beyond ±${quote.maxDeviationPct}%. No blended price is printed; inspect the outlier above.`);
+        }
+      }
+    }
+    if (quote.status !== "LIVE") {
+      process.exitCode = quote.status === "DISAGREEMENT" ? 1 : 2;
+    }
+  }
+
+  /**
+   * furlpay solana — live READ-ONLY Solana surface (gap report Gap 5, first
+   * slice). Real RPC reads (cluster status, lamport balance) and indicative
+   * Jupiter quotes. No key handling exists in this path: nothing here can
+   * sign or broadcast, and every output says so.
+   */
+  private async handleSolana(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
+    const sub = (subcommand || "status").toLowerCase().trim();
+    const json = flags.output === "json" || flags.json;
+
+    if (sub === "status") {
+      const client = new SolanaRpcClient();
+      try {
+        const epoch = await client.getEpochInfo();
+        const progressPct = (epoch.slotIndex / epoch.slotsInEpoch) * 100;
+        if (json) {
+          console.log(JSON.stringify({
+            command: "solana status",
+            rpc: client.describeEndpoint(),
+            mode: "read-only",
+            ...epoch,
+            epochProgressPct: Number(progressPct.toFixed(2)),
+          }, null, 2));
+        } else {
+          console.log(`Solana cluster status — ${client.describeEndpoint()} (read-only)`);
+          console.log(`  Epoch:          ${epoch.epoch} (${progressPct.toFixed(1)}% complete)`);
+          console.log(`  Absolute slot:  ${epoch.absoluteSlot}`);
+          console.log(`  Block height:   ${epoch.blockHeight}`);
+          console.log(`  Tx count:       ${epoch.transactionCount ?? "unavailable"}`);
+          console.log(`  [i] Live RPC reads only — this build does not sign or broadcast Solana transactions.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana status", error: err.message }, null, 2));
+        else console.error(`[!] Solana RPC unreachable: ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    if (sub === "balance") {
+      const address = (args[0] || flags.address || "").trim();
+      if (!address) {
+        console.log("Usage: furlpay solana balance <base58-address> [--output json]");
+        process.exitCode = 1;
+        return;
+      }
+      const client = new SolanaRpcClient();
+      try {
+        const lamports = await client.getBalanceLamports(address);
+        const sol = lamports / 1e9;
+        if (json) {
+          console.log(JSON.stringify({ command: "solana balance", address, lamports, sol, mode: "read-only" }, null, 2));
+        } else {
+          console.log(`Solana balance — ${address}`);
+          console.log(`  ${lamports.toLocaleString("en-US")} lamports (${sol} SOL)`);
+          console.log(`  [i] Live RPC read. No signing, no broadcasting in this build.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana balance", error: err.message }, null, 2));
+        else console.error(`[!] ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    if (sub === "price") {
+      const target = (args[0] || flags.mint || "").trim();
+      if (!target) {
+        const aliases = Object.keys(KNOWN_MINTS).join(", ");
+        console.log(`Usage: furlpay solana price <mint-or-alias> [--output json]`);
+        console.log(`Known aliases: ${aliases}. Any valid base58 mint address is accepted.`);
+        process.exitCode = 1;
+        return;
+      }
+      const jupiter = new JupiterClient();
+      const price = await jupiter.priceUsd(target);
+      if (!price) {
+        if (json) console.log(JSON.stringify({ command: "solana price", target, status: "UNAVAILABLE" }, null, 2));
+        else console.error(`[!] Jupiter price unavailable for ${target} — no price is guessed.`);
+        process.exitCode = 2;
+        return;
+      }
+      if (json) {
+        console.log(JSON.stringify({ command: "solana price", status: "LIVE", source: "jupiter:solana", ...price }, null, 2));
+      } else {
+        console.log(`Solana price — ${price.mint}`);
+        console.log(`  USD price:        $${price.usdPrice}`);
+        console.log(`  Liquidity:        ${price.liquidityUsd === null ? "unavailable" : "$" + Math.round(price.liquidityUsd).toLocaleString("en-US")}`);
+        console.log(`  24h change:       ${price.priceChange24hPct === null ? "unavailable" : price.priceChange24hPct.toFixed(2) + "%"}`);
+        console.log(`  Decimals:         ${price.decimals ?? "unavailable"}`);
+        console.log(`  Source:           Jupiter price v3 (live read)`);
+      }
+      return;
+    }
+
+    if (sub === "quote") {
+      const [inMint, outMint, rawAmount] = args;
+      if (!inMint || !outMint || !rawAmount) {
+        console.log("Usage: furlpay solana quote <input-mint|alias> <output-mint|alias> <raw-amount> [--slippage-bps 50] [--output json]");
+        console.log("raw-amount is an integer of the input mint's smallest unit (e.g. 100000000 = 0.1 SOL).");
+        process.exitCode = 1;
+        return;
+      }
+      const slippageBps = flags["slippage-bps"] !== undefined ? parseInt(flags["slippage-bps"], 10) : 50;
+      const jupiter = new JupiterClient();
+      try {
+        const quote = await jupiter.quote({
+          inputMint: inMint,
+          outputMint: outMint,
+          amount: rawAmount,
+          slippageBps: Number.isFinite(slippageBps) ? slippageBps : 50,
+        });
+        if (!quote) {
+          if (json) console.log(JSON.stringify({ command: "solana quote", status: "UNAVAILABLE" }, null, 2));
+          else console.error("[!] Jupiter quote unavailable — no route is fabricated.");
+          process.exitCode = 2;
+          return;
+        }
+        if (json) {
+          console.log(JSON.stringify({ command: "solana quote", ...quote }, null, 2));
+        } else {
+          console.log(`Jupiter indicative quote (${quote.swapMode}) — execution: ${quote.execution}`);
+          console.log(`  Input:   ${quote.inAmount} (${quote.inputMint})`);
+          console.log(`  Output:  ${quote.outAmount} (${quote.outputMint})`);
+          console.log(`  Route:   ${quote.routeLabels.join(" → ") || "direct"}`);
+          console.log(`  Slippage: ${quote.slippageBps} bps | Price impact: ${quote.priceImpactPct ?? "unavailable"}`);
+          console.log(`  [!] INDICATIVE ROUTING INFORMATION ONLY — this build has no Solana signing path; nothing here can fill this quote.`);
+        }
+      } catch (err: any) {
+        if (json) console.log(JSON.stringify({ command: "solana quote", error: err.message }, null, 2));
+        else console.error(`[!] ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    console.log("Usage: furlpay solana <status|balance|price|quote> [--output json]");
+    process.exitCode = 1;
   }
 
   private async handleAccount(subcommand: string | undefined, args: string[], flags: Record<string, any>): Promise<void> {
@@ -1982,6 +2209,8 @@ COMMANDS:
   mcp          Launch local Model Context Protocol server for AI agent runtimes
   config       Display, update, and validate CLI network, RPC, and keyring settings (show, path, get, set, validate)
   finance      Local financial operations: double-entry ledger, payments, spend limits, approvals, treasury, billing (init, status, ledger, spend, approval, payment, treasury, billing, events)
+  oracle       Live multi-source USD price quotes with cross-source agreement gating (price, sources)
+  solana       Live read-only Solana RPC + Jupiter surface: cluster status, lamport balance, indicative quotes (status, balance, price, quote)
   tx verify    Verify a real Stellar transaction against Horizon (honest lookup semantics, --output json)
   faucet       Fund a testnet/futurenet account via the official Stellar Friendbot (refuses mainnet)
 `);

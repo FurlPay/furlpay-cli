@@ -25,6 +25,8 @@ import { HyperliquidRiskEngine, defaultTurnoverLedgerPath } from "../hyperliquid
 import { HyperliquidClient } from "../hyperliquid/client";
 import { FinanceManager } from "../finance/manager";
 import { sanitizeUntrusted, sanitizeNumeric, canonicalArgsHash } from "./sanitize";
+import { OraclePriceAggregator } from "../oracles/aggregator";
+import { SolanaRpcClient } from "../solana/rpc";
 
 /** MCP surface modes (readiness P7): a default install cannot move funds. */
 export type McpMode = "read-only" | "execution";
@@ -470,6 +472,27 @@ export class McpStdioServer {
             inspect: { type: "string", description: "Inspect one payment by ledger tx id" },
           },
         },
+      },
+
+      // 11. Oracle & Solana live reads (gap report 2026-11-17 Gaps 2/5 —
+      // read-only, no signing path exists in either).
+      {
+        name: "furlpay_oracle_price",
+        description: "Live multi-source USD price quote (Coinbase/Kraken/Binance/Jupiter fan-out, median + cross-source agreement gate). DISAGREEMENT returns per-source readings with a null price — never a blended number across disagreeing sources.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            asset: { type: "string", description: "Asset symbol: SOL, BTC, ETH, XLM or USDC" },
+          },
+          required: ["asset"],
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false },
+      },
+      {
+        name: "furlpay_solana_cluster_status",
+        description: "Live read-only Solana cluster status from real RPC (epoch, slot, block height). No signing or broadcasting exists on this surface.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       },
 
       // 10. Two-phase execution protocol (readiness P7). Preview is always
@@ -948,6 +971,37 @@ export class McpStdioServer {
                 network: p.amount.network ?? null, destination: p.destination ?? null, txHash: p.txHash ?? null, createdAt: p.createdAt,
           })),
         };
+      }
+
+      case "furlpay_oracle_price": {
+        const asset = sanitizeUntrusted(String(args.asset ?? ""), 12).toUpperCase().trim();
+        if (!asset) throw new Error("furlpay_oracle_price requires an asset symbol (SOL, BTC, ETH, XLM, USDC).");
+        const quote = await new OraclePriceAggregator().getQuote(asset);
+        return {
+          asset: quote.asset,
+          status: quote.status,
+          priceUsd: quote.priceUsd,
+          readings: quote.readings.map((r) => ({ source: r.source, priceUsd: r.priceUsd })),
+          deviations: quote.deviations,
+          maxDeviationPct: quote.maxDeviationPct,
+          note: "Median of agreeing sources; DISAGREEMENT/UNAVAILABLE carry a null price by design — never a blended or guessed number.",
+        };
+      }
+
+      case "furlpay_solana_cluster_status": {
+        const client = new SolanaRpcClient();
+        try {
+          const epoch = await client.getEpochInfo();
+          return {
+            status: "LIVE",
+            rpc: client.describeEndpoint(),
+            mode: "read-only",
+            ...epoch,
+          };
+        } catch (err: any) {
+          // An RPC outage is surfaced, never papered over with slot 0.
+          return { status: "UNAVAILABLE", rpc: client.describeEndpoint(), error: err.message };
+        }
       }
 
       case "furlpay_list_chains": {
