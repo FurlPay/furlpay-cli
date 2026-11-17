@@ -34,6 +34,15 @@ Secrets live in environment variables or stdin — **never as CLI arguments** (a
 | `COLORTERM`, `TERM`, `WT_SESSION` | Color-level detection (truecolor / 256 / 16) |
 | `NODE_ENV`, `FURLPAY_ENV` | Environment hints; `production`/`live` gates sandbox fixtures |
 
+## Oracle & Solana endpoints
+
+| Variable | Purpose |
+|---|---|
+| `SOLANA_RPC_URL` | Solana JSON-RPC endpoint for `furlpay solana status/balance` (default: public mainnet-beta) |
+| `FURLPAY_PYTH_HERMES_URL` | Optional authorized Pyth Hermes gateway base URL — the Pyth provider is inactive without it (public Hermes is auth-gated) |
+| `FURLPAY_PYTH_FEED_IDS` | JSON map `{"SOL":"0x…"}` of verified Pyth feed ids (required with the gateway) |
+| `FURLPAY_JUPITER_API_URL` | Jupiter API base for `solana price/quote` (default: public Lite API) |
+
 ## Hygiene rules the CLI enforces
 
 - **Argv secrets are refused** — mnemonics/keys on stdin only (`wallet import`, `login --key`).

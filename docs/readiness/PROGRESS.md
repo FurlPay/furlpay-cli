@@ -3,6 +3,36 @@
 Tracks the readiness gap items (P1–P23) from the readiness plan. One row per
 item; branches are in this repo. Update per item after its report is written.
 
+## Gap report 2026-11-17 — oracle layer + Solana live reads (this branch)
+
+Closed two Phase-1 gaps from the November gap analysis with **verified-live,
+read-only** surfaces (every endpoint probed before wiring):
+
+- **Gap 2 (oracles)**: `src/oracles/` — multi-source USD quotes (Coinbase
+  spot, Kraken ticker, Binance USDT-cross, Jupiter Solana) medianed under
+  per-asset sanity bands with a cross-source agreement gate. DISAGREEMENT
+  and UNAVAILABLE both carry a null price — a disagreement is never averaged
+  away. Pyth Hermes provider ships structurally inactive: the public Hermes
+  endpoint answers "unauthorized" (Pyth Pro gate, verified 2026-11-17), so
+  activation requires an operator-supplied gateway + verified feed IDs, and
+  stale publishes are rejected.
+- **Gap 5 (Solana)**: `src/solana/rpc.ts` + `src/solana/jupiter.ts` — live
+  mainnet RPC reads (epoch/slot/balance; base58 validation pre-request;
+  protocol errors throw) and indicative Jupiter price/quote routes. No
+  signing path exists in this slice; every output says so and quotes are
+  labeled INDICATIVE. Solana execution later goes through the capability
+  registry's live gate (P1).
+- CLI: `furlpay oracle price|sources`, `furlpay solana status|balance|price|quote`;
+  MCP: `furlpay_oracle_price`, `furlpay_solana_cluster_status` (read-only).
+- Tests: `test/oracle.test.js` (14), `test/solana-live.test.js` (15) — all
+  injected-transport, no live network in CI. Honesty matrix, docs-site
+  reference pages, `.env.example` and CHANGELOG updated.
+
+Remaining gap-report items stay tracked: Gap 1 (live Stellar execution) is
+readiness P9's decision gate; Gap 7 (OFAC/travel-rule) is P2 and ships only
+with registry controls rows — a half-working screening service would read as
+compliance coverage it does not have.
+
 ## External audit 2026-11-17b — remediated (ca7d4fb)
 
 12 findings; 11 fixed with regression tests in `test/audit-2026-11-17b.test.js`

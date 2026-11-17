@@ -59,6 +59,17 @@ Every command accepts `--json` where output is structured. Global flags: `--env 
 | `furlpay rwa list\|inspect\|kyc` | Tokenized securities catalog (SEP-8 never claimed) |
 | `furlpay escrow create\|fund\|start-delivery\|proof\|release\|dispute\|status` | ETSS local escrow ledger |
 
+## Oracle & Solana (live read-only)
+
+| Command | Description |
+|---|---|
+| `furlpay oracle price <ASSET>` | Multi-source USD quote (Coinbase/Kraken/Binance/Jupiter), median + agreement gate — DISAGREEMENT/UNAVAILABLE carry a null price |
+| `furlpay oracle sources` | Source inventory: endpoints and covered assets (Pyth gateway shown inactive unless configured) |
+| `furlpay solana status` | Live cluster status from mainnet RPC (epoch, slot, block height) |
+| `furlpay solana balance <addr>` | Lamport balance via live RPC (base58-validated) |
+| `furlpay solana price <mint|alias>` | Jupiter liquidity-weighted USD price (SOL, USDC aliases) |
+| `furlpay solana quote <in> <out> <raw-amount>` | Indicative Jupiter route — labeled INDICATIVE, nothing in this build can fill it |
+
 ## Verification & diagnostics
 
 | Command | Description |

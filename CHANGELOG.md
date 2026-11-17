@@ -8,9 +8,42 @@ releases; patch releases are always safe to take.
 
 ## Unreleased
 
-Readiness P7 — MCP defaults & human-in-the-loop.
+Oracles & Solana live read-only surface (2026-11-17 gap report, Gaps 2 + 5).
 
-### Security
+### Added
+
+- **Oracle layer** (`furlpay oracle price|sources`, MCP `furlpay_oracle_price`) —
+  live multi-source USD quotes fanned out across real public endpoints
+  (Coinbase spot, Kraken ticker, Binance USDT-cross, Jupiter Solana), medianed
+  and gated on per-asset cross-source agreement (±1–3%). Sanity bands per
+  asset (SOL $1–$2000 mirroring the web app's clamp rule). DISAGREEMENT
+  returns the per-source readings with a **null price** — a blend across
+  disagreeing sources is exactly the fabrication the CLI refuses to print;
+  UNAVAILABLE guesses nothing. An optional Pyth Hermes gateway provider is
+  structurally inactive until `FURLPAY_PYTH_HERMES_URL` +
+  `FURLPAY_PYTH_FEED_IDS` are configured (the public Hermes endpoint is
+  auth-gated since Pyth Pro, September 2026 — no unverified feed IDs ship
+  baked in), and it rejects stale publishes.
+- **Solana live read-only surface** (`furlpay solana status|balance|price|quote`,
+  MCP `furlpay_solana_cluster_status`) — real JSON-RPC reads against
+  mainnet-beta (epoch/slot/block height, lamport balances, `SOLANA_RPC_URL`
+  override) and indicative Jupiter price/route quotes. Addresses are
+  validated as base58 before any request; RPC protocol and HTTP errors
+  **throw** — never a synthetic slot or a fabricated route. Every output
+  states that this build has no Solana signing path: quotes are labeled
+  `INDICATIVE` routing information nothing in this CLI can fill. Execution
+  (when it ships) will go through the capability registry's live gate — this
+  module deliberately contains no signing path.
+- MCP server gains two read-only tools (35 total):
+  `furlpay_oracle_price`, `furlpay_solana_cluster_status`.
+- New offline regression suites: `test/oracle.test.js` (14 tests — agreement
+  gate, sanity bands, per-provider real-shape parsing, Pyth staleness),
+  `test/solana-live.test.js` (15 tests — fail-closed address validation,
+  RPC error surfacing, integer-amount enforcement, INDICATIVE labeling).
+
+
+
+### Security (readiness P7 — MCP defaults & human-in-the-loop)
 
 - **A fresh `furlpay mcp` cannot move funds.** The server now defaults to
   READ-ONLY mode: every value-moving tool (settle invoice, treasury sweep,

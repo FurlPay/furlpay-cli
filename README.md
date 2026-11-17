@@ -510,7 +510,7 @@ Add to your MCP configuration (`claude_desktop_config.json` / Cursor):
 }
 ```
 
-### Exposed MCP Tools (28 total — read-only research + policy-gated execution):
+### Exposed MCP Tools (35 total — read-only research + policy-gated execution):
 
 **Fork asset operations (read-only):**
 - `fork_list_networks` / `fork_inspect_network` / `fork_replay_check`: declared fork registry and offline replay-risk audits (BTCB2, BTC1, ECX).
@@ -657,6 +657,8 @@ Every execution surface in this CLI is labeled at runtime. Summary:
 | Stellar SDEX order flow / SEP-8 KYC / Soroban swaps | **SIMULATED** | Deterministic local simulation of Horizon/Soroban submission — no network transactions are broadcast in this build. SEP-8: `rwa kyc` reports `NOT_IMPLEMENTED` (exit 1), and regulated-asset trade results carry `sep8Status: "not_performed"` — compliance is never claimed. Registry carries no hardcoded APY and no invented approval-server URLs. |
 | MCP `furlpay_balance` (unauthenticated mode) | **SIMULATED** | Sample fixture balances, flagged `simulated: true` |
 | FOBXX sweep (`furlpay_sweep_treasury` target FOBXX) | **SIMULATED** | No Stellar Benji contract call in this build |
+| Oracle quotes (`furlpay oracle price/sources`, MCP `furlpay_oracle_price`) | **LIVE** (read-only) | Multi-source USD price fan-out over real public endpoints (Coinbase spot, Kraken ticker, Binance USDT-cross, Jupiter Solana); median of sources gated on per-asset cross-source agreement (±1–3%). DISAGREEMENT returns per-source readings with a **null price** — never a blended number across disagreeing sources; UNAVAILABLE guesses nothing. Sanity bands per asset (SOL clamped $1–$2000). Optional Pyth Hermes gateway provider is **inactive unless configured** — the public Hermes endpoint is auth-gated (Pyth Pro); no unverified feed IDs ship baked in. This surface never signs or broadcasts. |
+| Solana live surface (`furlpay solana status/balance/price/quote`, MCP `furlpay_solana_cluster_status`) | **LIVE** (read-only) | Real JSON-RPC reads against mainnet-beta (epoch/slot/block height, lamport balances; `SOLANA_RPC_URL` override) and indicative Jupiter price/quote routes. Addresses validated as base58 before any request; RPC protocol/HTTP errors **throw** — never a synthetic slot. Every output states that this build has no Solana signing path: quotes are labeled `INDICATIVE` routing information and cannot be filled by anything in this CLI. |
 
 **Environment keys:** HLP/perp execution reads `HYPERLIQUID_PRIVATE_KEY` (or
 `ETH_PRIVATE_KEY`) from the environment — never from argv. Private keys and
